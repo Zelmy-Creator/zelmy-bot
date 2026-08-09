@@ -12,8 +12,8 @@ from bs4 import BeautifulSoup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- 2. КОНФИГУРАЦИЯ ---
-BOT_TOKEN = "ТВОЙ_ТОКЕН_СЮДА"
-GROQ_KEY = "ТВОЙ_КЛЮЧ_GROQ_СЮДА"
+BOT_TOKEN =  os.getenv("BOT_TOKEN")
+GROQ_KEY = os.getenv("GROQ_KEY")
 OWNER_ID = 8482782819  # Твой Telegram ID
 
 HISTORY_FILE = "chat_history.json"
