@@ -6,13 +6,14 @@ import telebot
 from telebot import types
 import logging
 import re
+from bs4 import BeautifulSoup
 
 # --- 1. ЛОГИРОВАНИЕ ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- 2. КОНФИГУРАЦИЯ ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROQ_KEY = os.getenv("GROQ_KEY")
+BOT_TOKEN = "ТВОЙ_ТОКЕН_СЮДА"
+GROQ_KEY = "ТВОЙ_КЛЮЧ_GROQ_СЮДА"
 OWNER_ID = 8482782819  # Твой Telegram ID
 
 HISTORY_FILE = "chat_history.json"
@@ -60,25 +61,56 @@ def save_memory(key, value):
     logging.info(f"🧠 Запомнил: {key} → {value}")
 
 def search_memory(query):
-    """Ищет ТОЧНОЕ совпадение в памяти"""
     results = []
     query_lower = query.lower()
-    
     for key, value in memory_db.items():
         if query_lower in key:
             results.append((key, value))
-    
     return results[:3]
 
-# --- 4. ОСНОВНАЯ ЛОГИКА ---
+# --- 4. ПОИСК В ИНТЕРНЕТЕ ---
+def search_duckduckgo(query):
+    try:
+        url = f"https://lite.duckduckgo.com/lite/?q={query}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, timeout=15, headers=headers)
+        
+        if response.status_code != 200:
+            return None
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        results = []
+        
+        for row in soup.find_all('tr'):
+            snippet_cell = row.find('td', class_='result-snippet')
+            if snippet_cell:
+                title_tag = row.find('a')
+                if title_tag:
+                    title = title_tag.get_text(strip=True)
+                    link = title_tag.get('href', '')
+                    snippet = snippet_cell.get_text(strip=True)
+                    if snippet and len(snippet) > 10:
+                        clean_link = re.sub(r'^//', 'https://', link)
+                        clean_link = re.sub(r'\?.*$', '', clean_link)
+                        results.append({
+                            'title': title,
+                            'link': clean_link,
+                            'snippet': snippet[:300]
+                        })
+        
+        return results[:5]
+        
+    except Exception as e:
+        logging.error(f"Поиск ошибка: {e}")
+        return None
+
+# --- 5. ОСНОВНАЯ ЛОГИКА ---
 def process_llm_request(chat_id, user_id, text, original_message=None):
     str_chat_id = str(chat_id)
     try:
         bot.send_chat_action(chat_id, 'typing')
         
-        # ============================================================
-        # 1. ЖЁСТКИЙ ОТВЕТ НА "КТО Я"
-        # ============================================================
+        # --- ЖЁСТКИЙ ОТВЕТ НА "КТО Я" ---
         if any(phrase in text.lower() for phrase in ['кто я', 'кто я?', 'я кто', 'я твой создатель', 'я создатель']):
             if user_id == OWNER_ID:
                 reply = "Ты — Zelmy Create, мой создатель. Я всегда буду помнить это."
@@ -89,8 +121,27 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
             else:
                 bot.send_message(chat_id, reply)
             return
-        # ============================================================
-        
+
+        # --- ПОИСК В ИНТЕРНЕТЕ (если есть "найди" или "поищи") ---
+        if any(word in text.lower() for word in ['найди', 'поищи', 'найти', 'поиск']):
+            search_results = search_duckduckgo(text)
+            if search_results:
+                reply = "🔍 **Результаты поиска:**\n\n"
+                for res in search_results:
+                    reply += f"• **{res['title']}**\n{res['snippet']}\n[Источник]({res['link']})\n\n"
+                if original_message:
+                    bot.reply_to(original_message, reply)
+                else:
+                    bot.send_message(chat_id, reply)
+                return
+            else:
+                reply = "🌐 Ничего не нашёл. Попробуй переформулировать запрос."
+                if original_message:
+                    bot.reply_to(original_message, reply)
+                else:
+                    bot.send_message(chat_id, reply)
+                return
+
         # --- ЗАПОМИНАНИЕ ДЛЯ ВЛАДЕЛЬЦА ---
         if text.lower().startswith('запомни') and user_id == OWNER_ID:
             content = text[7:].strip()
@@ -129,7 +180,6 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
             for key, value in memory_results[:3]:
                 memory_context += f"• **{key}** → {value}\n"
 
-        # --- ЕСЛИ ЕСТЬ В ПАМЯТИ ---
         if memory_results:
             if original_message:
                 bot.reply_to(original_message, memory_context)
@@ -141,7 +191,6 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
         if str_chat_id not in history_db:
             history_db[str_chat_id] = []
 
-        # Исправляем грамматику
         text = re.sub(r'основан на', 'основал', text, flags=re.IGNORECASE)
         text = re.sub(r'кто основан', 'кто основал', text, flags=re.IGNORECASE)
 
@@ -194,7 +243,7 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
         except:
             pass
 
-# --- 5. КОМАНДЫ ---
+# --- 6. КОМАНДЫ ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     logging.info(f"Start от {message.from_user.id}")
@@ -208,9 +257,11 @@ def start_cmd(message):
             "🔥 **Zelmy AI — ГИБРИДНЫЙ РЕЖИМ**\n\n"
             "📌 **Как я работаю:**\n"
             "1. Сначала ищу в твоей памяти\n"
-            "2. Если не нахожу — использую ИИ (Groq)\n\n"
+            "2. Если не нахожу — использую ИИ (Groq)\n"
+            "3. Если есть слово 'найди' — ищу в интернете\n\n"
             "📌 **Ты можешь:**\n"
             "• Запоминать факты: `запомни: вопрос — ответ`\n"
+            "• Искать в интернете: `найди ...`\n"
             "• Получать ответы от ИИ на любые вопросы\n\n"
             "📌 **Команды:**\n"
             "/reset — очистить историю\n"
@@ -222,7 +273,7 @@ def start_cmd(message):
     else:
         welcome = (
             "🌱 **Zelmy AI**\n\n"
-            "Я отвечаю на вопросы, используя мощный ИИ.\n"
+            "Я отвечаю на вопросы, используя мощный ИИ и интернет.\n"
             "Мой создатель постоянно учит меня новому.\n\n"
             "📌 **Просто задай вопрос** — я постараюсь ответить."
         )
@@ -241,14 +292,16 @@ def show_help(message):
             "/show_memory — показать всю память\n"
             "/forget — удалить ВСЮ память\n\n"
             "📌 **Как запомнить:**\n"
-            "`запомни: вопрос — ответ`"
+            "`запомни: вопрос — ответ`\n\n"
+            "📌 **Как искать:**\n"
+            "`найди ...` или `поищи ...`"
         )
     else:
         text = (
             "🤖 **Команды:**\n"
             "/start — перезапустить\n\n"
             "📌 **Как это работает:**\n"
-            "Я использую мощный ИИ, чтобы отвечать на твои вопросы."
+            "Я использую мощный ИИ и интернет, чтобы отвечать на твои вопросы."
         )
     bot.reply_to(message, text)
 
@@ -314,7 +367,7 @@ def show_stats(message):
         f"⚙️ Модель: {CURRENT_MODEL}"
     )
 
-# --- 6. ГОЛОСОВЫЕ ---
+# --- 7. ГОЛОСОВЫЕ ---
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
     logging.info(f"Голос от {message.from_user.id}")
@@ -345,17 +398,17 @@ def handle_voice(message):
         if os.path.exists(voice_path):
             os.remove(voice_path)
 
-# --- 7. ТЕКСТ ---
+# --- 8. ТЕКСТ ---
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     logging.info(f"Текст от {message.from_user.id}: {message.text[:50] if message.text else 'пусто'}")
     track_user(message.from_user)
     process_llm_request(message.chat.id, message.from_user.id, message.text, message)
 
-# --- 8. ЗАПУСК ---
+# --- 9. ЗАПУСК ---
 print("="*50)
-print("🤖 **Zelmy AI — ГИБРИДНЫЙ РЕЖИМ**")
-print("✅ Сначала точная память, потом мощный ИИ")
+print("🤖 **Zelmy AI — С ПОИСКОМ В ИНТЕРНЕТЕ**")
+print("✅ Память + Groq + DuckDuckGo")
 print("="*50)
 
 while True:
@@ -364,4 +417,4 @@ while True:
     except Exception as e:
         logging.error(f"Сбой: {e}")
         print(f"⚠️ Переподключение через 5 секунд...")
-        time.sleep(5)
+        time.sleep(5)    
