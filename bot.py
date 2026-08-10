@@ -96,13 +96,12 @@ def get_subscription_reminder(user_id):
     sub = subscriptions[user_id]
     expires_at = sub.get('expires_at', 0)
     days_left = (expires_at - time.time()) / 86400
-
     if days_left < 0:
         return "❌ Твоя подписка истекла. Чтобы продлить — напиши /premium"
     if days_left <= 1:
-        return "⚠️ Братан, у тебя последний день подписки! Продли её, чтобы не потерять доступ: /premium"
+        return "⚠️ Братан, у тебя последний день подписки! Продли её: /premium"
     if days_left <= 3:
-        return f"⏳ Напоминаю: твоя подписка истекает через {round(days_left)} дня. Продли её: /premium"
+        return f"⏳ Напоминаю: подписка истекает через {round(days_left)} дня. Продли: /premium"
     return None
 
 # --- 5. ПОИСК ЧЕРЕЗ APIFY BRAVE ---
@@ -161,8 +160,7 @@ def generate_image(prompt):
     except Exception as e:
         logging.error(f"Генерация картинки ошибка: {e}")
         return None
-
-# --- 8. КЛАВИАТУРА ---
+        # --- 8. КЛАВИАТУРА ---
 def get_main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     btn1 = types.KeyboardButton("📖 Помощь")
@@ -189,7 +187,6 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
     try:
         bot.send_chat_action(chat_id, 'typing')
         
-        # --- ОТВЕТЫ ПРО СОЗДАТЕЛЯ ---
         creator_phrases = ['кто я', 'кто я?', 'я кто', 'ты признаешь себя', 'ты считаешь себя', 'ты мой создатель', 'ты создатель', 'кто мой создатель', 'чей ты бот']
         if any(phrase in text.lower() for phrase in creator_phrases):
             if user_id == OWNER_ID:
@@ -202,17 +199,16 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 bot.send_message(chat_id, reply)
             return
 
-        # --- ПОИСК ---
         if any(word in text.lower() for word in ['найди', 'поищи', 'найти', 'поиск']):
             search_results = search_apify_brave(text)
             if search_results:
-                reply = "🔍 **Результаты поиска:**\n\n"
+                reply = "🔍 <b>Результаты поиска:</b>\n\n"
                 for res in search_results:
-                    reply += f"• **{res['title']}**\n{res['snippet']}\n[Источник]({res['link']})\n\n"
+                    reply += f"• <b>{res['title']}</b>\n{res['snippet']}\n<a href='{res['link']}'>Источник</a>\n\n"
                 if original_message:
-                    bot.reply_to(original_message, reply)
+                    bot.reply_to(original_message, reply, parse_mode="HTML")
                 else:
-                    bot.send_message(chat_id, reply)
+                    bot.send_message(chat_id, reply, parse_mode="HTML")
                 return
             else:
                 reply = "🌐 Ничего не нашёл. Попробуй переформулировать запрос."
@@ -222,7 +218,6 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                     bot.send_message(chat_id, reply)
                 return
 
-        # --- ГЕНЕРАЦИЯ КАРТИНКИ ---
         if text.lower().startswith('нарисуй') or text.lower().startswith('сгенерируй'):
             if user_id != OWNER_ID and not is_premium(user_id):
                 reply = "❌ Генерация картинок доступна только по подписке! /premium"
@@ -233,11 +228,11 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 return
             prompt = text[8:].strip()
             if not prompt:
-                reply = "❌ Напиши, что нарисовать: `нарисуй кота`"
+                reply = "❌ Напиши, что нарисовать: <code>нарисуй кота</code>"
                 if original_message:
-                    bot.reply_to(original_message, reply)
+                    bot.reply_to(original_message, reply, parse_mode="HTML")
                 else:
-                    bot.send_message(chat_id, reply)
+                    bot.send_message(chat_id, reply, parse_mode="HTML")
                 return
             bot.send_message(chat_id, "🎨 Генерирую картинку... Подожди 5-10 секунд.")
             enhanced_prompt = enhance_prompt_with_groq(prompt)
@@ -248,7 +243,6 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 bot.send_message(chat_id, "❌ Не удалось сгенерировать картинку. Попробуй позже.")
             return
 
-        # --- ИСТОРИЯ + ПАМЯТЬ ---
         if str_chat_id not in history_db:
             history_db[str_chat_id] = []
 
@@ -280,7 +274,6 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
             history_db[str_chat_id].append({"role": "assistant", "content": reply})
             save_json(HISTORY_FILE, history_db)
             
-            # --- НАПОМИНАНИЕ О ПОДПИСКЕ ---
             reminder = get_subscription_reminder(user_id)
             if reminder:
                 reply += f"\n\n{reminder}"
@@ -306,8 +299,7 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 bot.send_message(chat_id, error_text)
         except:
             pass
-
-# --- 10. ЗРЕНИЕ (ТОЛЬКО ДЛЯ ПОДПИСАННЫХ) ---
+            # --- 10. ЗРЕНИЕ ---
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     track_user(message.from_user)
@@ -316,12 +308,13 @@ def handle_photo(message):
     if user_id != OWNER_ID and not is_premium(user_id):
         bot.reply_to(
             message,
-            "📸 **Зрение доступно только по подписке!**\n\n"
+            "📸 <b>Зрение доступно только по подписке!</b>\n\n"
             "Оформи Premium за 30 Stars/месяц и я смогу:\n"
             "• Описывать картинки\n"
             "• Отвечать на вопросы по фото\n"
             "• Распознавать текст на изображениях\n\n"
-            "👉 /premium — чтобы оформить подписку"
+            "👉 /premium — чтобы оформить подписку",
+            parse_mode="HTML"
         )
         return
 
@@ -351,7 +344,7 @@ def handle_photo(message):
         
         if response.status_code == 200:
             reply = response.json()['choices'][0]['message']['content']
-            bot.reply_to(message, f"🖼️ **Описание:**\n{reply}")
+            bot.reply_to(message, f"🖼️ <b>Описание:</b>\n{reply}", parse_mode="HTML")
         else:
             bot.reply_to(message, "❌ Не удалось распознать изображение.")
     except Exception as e:
@@ -369,11 +362,11 @@ def premium_button(msg):
 
 @bot.message_handler(func=lambda msg: msg.text == "🔍 Найди")
 def search_button(msg):
-    bot.reply_to(msg, "✏️ Напиши: `найди ...`")
+    bot.reply_to(msg, "✏️ Напиши: <code>найди ...</code>", parse_mode="HTML")
 
 @bot.message_handler(func=lambda msg: msg.text == "🎨 Нарисуй")
 def draw_button(msg):
-    bot.reply_to(msg, "✏️ Напиши: `нарисуй ...`")
+    bot.reply_to(msg, "✏️ Напиши: <code>нарисуй ...</code>", parse_mode="HTML")
 
 @bot.message_handler(func=lambda msg: msg.text == "📸 Фото")
 def photo_button(msg):
@@ -392,7 +385,6 @@ def start_cmd(message):
     history_db[str_chat_id] = []
     save_json(HISTORY_FILE, history_db)
 
-    # --- ПРОВЕРКА ПОДПИСКИ НА КАНАЛ ---
     try:
         member = bot.get_chat_member(CHANNEL_USERNAME, message.from_user.id)
         is_subscribed = member.status in ['creator', 'administrator', 'member']
@@ -404,37 +396,37 @@ def start_cmd(message):
         markup.add(types.InlineKeyboardButton("📢 Подписаться на канал", url="https://t.me/ZelmyAI"))
         markup.add(types.InlineKeyboardButton("✅ Я подписался", callback_data="check_sub"))
         welcome_text = (
-            "👋 **Привет, я Zelmy AI!**\n\n"
+            "👋 <b>Привет, я Zelmy AI!</b>\n\n"
             "Я — твой мощный ИИ-помощник с доступом к интернету.\n\n"
-            "🤖 **Что я умею:**\n"
+            "🤖 <b>Что я умею:</b>\n"
             "• Отвечать на любые вопросы (ИИ Groq)\n"
-            "• Искать информацию: `найди ...`\n"
-            "• Генерировать картинки: `нарисуй ...`\n"
+            "• Искать информацию: <code>найди ...</code>\n"
+            "• Генерировать картинки: <code>нарисуй ...</code>\n"
             "• Распознавать фото (по подписке)\n\n"
-            "👨‍💻 **Мой создатель:** @ZelmyCreate\n\n"
-            "📢 **Чтобы пользоваться ботом, подпишись на канал:**"
+            "👨‍💻 <b>Мой создатель:</b> Zelmy Create\n\n"
+            "📢 <b>Чтобы пользоваться ботом, подпишись на канал:</b>"
         )
-        bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=markup)
+        bot.send_message(message.chat.id, welcome_text, parse_mode="HTML", reply_markup=markup)
         return
 
     keyboard = get_main_keyboard()
     welcome_text = (
-        "🔥 **Zelmy AI — ПЛАТИНОВАЯ ВЕРСИЯ**\n\n"
-        "📌 **Что я умею:**\n"
-        "• Искать в интернете: `найди ...`\n"
-        "• Генерировать картинки: `нарисуй ...`\n"
+        "🔥 <b>Zelmy AI — ПЛАТИНОВАЯ ВЕРСИЯ</b>\n\n"
+        "📌 <b>Что я умею:</b>\n"
+        "• Искать в интернете: <code>найди ...</code>\n"
+        "• Генерировать картинки: <code>нарисуй ...</code>\n"
         "• Распознавать фото (по подписке)\n"
         "• Отвечать на любые вопросы (Groq)\n"
         "• Помнить до 100 сообщений диалога\n\n"
-        "💰 **Подписка:**\n"
+        "💰 <b>Подписка:</b>\n"
         "• Бесплатно: 5 запросов/день\n"
         "• Premium: 30 Stars/мес — безлимит\n"
         "• Pro: 50 Stars/мес — + генерация картинок и зрение\n\n"
-        "📌 **Команды:**\n"
-        "/premium, /reset, /model, /stats, /forget, /show_memory\n\n"
-        "📢 **Наш канал:** [@ZelmyAI](https://t.me/ZelmyAI)"
+        "📌 <b>Команды:</b>\n"
+        "/premium, /reset, /model, /stats\n\n"
+        "📢 <b>Наш канал:</b> <a href='https://t.me/ZelmyAI'>@ZelmyAI</a>"
     )
-    bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=keyboard)
+    bot.send_message(message.chat.id, welcome_text, parse_mode="HTML", reply_markup=keyboard)
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
 def callback_check_sub(call):
@@ -452,28 +444,28 @@ def callback_check_sub(call):
 @bot.message_handler(commands=['help'])
 def show_help(message):
     text = (
-        "🤖 **Команды Zelmy AI:**\n\n"
+        "🤖 <b>Команды Zelmy AI:</b>\n\n"
         "/start — перезапустить\n"
         "/premium — тарифы и подписка\n\n"
-        "`найди ...` — поиск в интернете\n"
-        "`нарисуй ...` — генерация картинки (Premium)\n"
+        "<code>найди ...</code> — поиск в интернете\n"
+        "<code>нарисуй ...</code> — генерация картинки (Premium)\n"
         "📸 Отправь фото — описание (Premium)\n\n"
-        "/reset, /model, /stats, /forget, /show_memory — админские"
+        "/reset, /model, /stats — админские"
     )
-    bot.reply_to(message, text)
+    bot.reply_to(message, text, parse_mode="HTML")
 
 @bot.message_handler(commands=['premium'])
 def premium_cmd(message):
     user_id = message.from_user.id
     plan = get_user_plan(user_id)
     if plan != "free":
-        bot.reply_to(message, f"🌟 У тебя уже есть подписка **{plan}**")
+        bot.reply_to(message, f"🌟 У тебя уже есть подписка <b>{plan}</b>", parse_mode="HTML")
         return
-    text = "🌟 **Zelmy AI Premium**\n\n💰 **Тарифы:**\n• 30 Stars/мес — Premium\n• 50 Stars/мес — Pro\n\n📌 Нажми на кнопку ниже для оплаты."
+    text = "🌟 <b>Zelmy AI Premium</b>\n\n💰 <b>Тарифы:</b>\n• 30 Stars/мес — Premium\n• 50 Stars/мес — Pro\n\n📌 Нажми на кнопку ниже для оплаты."
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("💎 30 Stars — Premium", callback_data="buy_premium"))
     markup.add(types.InlineKeyboardButton("🌟 50 Stars — Pro", callback_data="buy_pro"))
-    bot.reply_to(message, text, reply_markup=markup)
+    bot.reply_to(message, text, parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data in ['buy_premium', 'buy_pro'])
 def handle_purchase(call):
@@ -509,7 +501,30 @@ def successful_payment(message):
     elif plan == "pro":
         subscriptions[user_id] = {'plan': 'pro', 'expires_at': time.time() + 30 * 24 * 60 * 60}
     save_json(SUBSCRIPTIONS_FILE, subscriptions)
-    bot.send_message(message.chat.id, f"✅ Подписка **{plan}** активирована на 30 дней! Спасибо!")
+    bot.send_message(message.chat.id, f"✅ Подписка <b>{plan}</b> активирована на 30 дней! Спасибо!", parse_mode="HTML")
+
+@bot.message_handler(commands=['model'])
+def switch_model(message):
+    global CURRENT_MODEL
+    if message.from_user.id != OWNER_ID:
+        bot.reply_to(message, "❌ Только создатель.")
+        return
+    if CURRENT_MODEL == "llama-3.1-8b-instant":
+        CURRENT_MODEL = "llama-3.3-70b-versatile"
+        bot.reply_to(message, "✅ 70B модель")
+    else:
+        CURRENT_MODEL = "llama-3.1-8b-instant"
+        bot.reply_to(message, "✅ 8B модель")
+
+@bot.message_handler(commands=['reset'])
+def reset_history(message):
+    if message.from_user.id != OWNER_ID:
+        bot.reply_to(message, "❌ Только создатель.")
+        return
+    str_chat_id = str(message.chat.id)
+    history_db[str_chat_id] = []
+    save_json(HISTORY_FILE, history_db)
+    bot.reply_to(message, "🧹 История очищена!")
 
 @bot.message_handler(commands=['stats'])
 def show_stats(message):
@@ -519,13 +534,13 @@ def show_stats(message):
     total_users = len(users_db)
     total_subs = len(subscriptions)
     bot.reply_to(message,
-        f"📊 **Статистика:**\n"
+        f"📊 <b>Статистика:</b>\n"
         f"👤 Пользователей: {total_users}\n"
         f"🌟 Подписок: {total_subs}\n"
-        f"⚙️ Модель: {CURRENT_MODEL}"
-    )
-
-# --- 13. ГОЛОСОВЫЕ ---
+        f"⚙️ Модель: {CURRENT_MODEL}",
+        parse_mode="HTML"
+                )
+    # --- 13. ГОЛОСОВЫЕ ---
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
     logging.info(f"Голос от {message.from_user.id}")
@@ -575,4 +590,4 @@ while True:
     except Exception as e:
         logging.error(f"Сбой: {e}")
         print(f"⚠️ Переподключение через 5 секунд...")
-        time.sleep(5)                                            
+        time.sleep(5)
