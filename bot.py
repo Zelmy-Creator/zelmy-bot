@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_KEY = os.getenv("GROQ_KEY")
 APIFY_KEY = os.getenv("APIFY_KEY")  # твой ключ от Apify
-OWNER_ID = 8482782819
+OWNER_ID = 8482782819  # ТВОЙ ID
 
 HISTORY_FILE = "chat_history.json"
 USERS_FILE = "users.json"
@@ -148,6 +148,8 @@ def generate_image(prompt):
 # --- 7. ОСНОВНАЯ ЛОГИКА ---
 def process_llm_request(chat_id, user_id, text, original_message=None):
     str_chat_id = str(chat_id)
+    
+    # Проверка лимита для обычных пользователей
     if not check_usage_limit(user_id) and not is_premium(user_id):
         reply = "❌ Бесплатный лимит (5 запросов/день) исчерпан. Купи подписку: /premium"
         if original_message:
@@ -155,6 +157,7 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
         else:
             bot.send_message(chat_id, reply)
         return
+    
     try:
         bot.send_chat_action(chat_id, 'typing')
         
@@ -193,13 +196,15 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
 
         # --- ГЕНЕРАЦИЯ КАРТИНКИ ---
         if text.lower().startswith('нарисуй') or text.lower().startswith('сгенерируй'):
-            if not is_premium(user_id):
+            # Проверка: если это не владелец И нет подписки — блокируем
+            if user_id != OWNER_ID and not is_premium(user_id):
                 reply = "❌ Генерация картинок доступна только по подписке! /premium"
                 if original_message:
                     bot.reply_to(original_message, reply)
                 else:
                     bot.send_message(chat_id, reply)
                 return
+
             prompt = text[8:].strip()
             if not prompt:
                 reply = "❌ Напиши, что нарисовать: `нарисуй кота`"
@@ -208,6 +213,7 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 else:
                     bot.send_message(chat_id, reply)
                 return
+
             bot.send_message(chat_id, "🎨 Генерирую картинку... Подожди 5-10 секунд.")
             image_data = generate_image(prompt)
             if image_data:
@@ -535,4 +541,5 @@ while True:
     except Exception as e:
         logging.error(f"Сбой: {e}")
         print(f"⚠️ Переподключение через 5 секунд...")
-        time.sleep(5)                            
+        time.sleep(5)    
+                                                   
