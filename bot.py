@@ -53,7 +53,8 @@ def track_user(user):
     str_id = str(user.id)
     users_db[str_id] = {
         "username": user.username or "нет_юзернейма",
-        "first_name": user.first_name or "Без имени"
+        "first_name": user.first_name or "Без имени",
+        "first_seen": datetime.now().strftime("%Y-%m-%d %H:%M")
     }
     save_json(USERS_FILE, users_db)
 
@@ -104,27 +105,54 @@ def get_subscription_reminder(user_id):
         return f"⏳ Напоминаю: подписка истекает через {round(days_left)} дня. Продли: /premium"
     return None
 
-# --- 5. ПОИСК ЧЕРЕЗ APIFY BRAVE ---
-def search_apify_brave(query):
+# --- 5. ГИБРИДНЫЙ ПОИСК (Apify + DuckDuckGo) ---
+def search_web(query):
     try:
         url = "https://api.apify.com/v2/acts/miroslav~brave-search/runs"
         params = {"token": APIFY_KEY}
         payload = {"query": query, "count": 5}
         response = requests.post(url, json=payload, params=params, timeout=15)
-        if response.status_code != 200:
-            return None
-        data = response.json()
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            for item in data.get('data', {}).get('web', {}).get('results', []):
+                results.append({
+                    'title': item.get('title', 'Без заголовка'),
+                    'link': item.get('url', ''),
+                    'snippet': item.get('description', '')[:300]
+                })
+            if results:
+                return results[:5]
+    except:
+        pass
+    
+    try:
+        url = f"https://lite.duckduckgo.com/lite/?q={query}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, timeout=15, headers=headers)
+        soup = BeautifulSoup(response.text, 'html.parser')
         results = []
-        for item in data.get('data', {}).get('web', {}).get('results', []):
-            results.append({
-                'title': item.get('title', 'Без заголовка'),
-                'link': item.get('url', ''),
-                'snippet': item.get('description', '')[:300]
-            })
-        return results[:5]
-    except Exception as e:
-        logging.error(f"Apify ошибка: {e}")
-        return None
+        for row in soup.find_all('tr'):
+            snippet_cell = row.find('td', class_='result-snippet')
+            if snippet_cell:
+                title_tag = row.find('a')
+                if title_tag:
+                    title = title_tag.get_text(strip=True)
+                    link = title_tag.get('href', '')
+                    snippet = snippet_cell.get_text(strip=True)
+                    if snippet and len(snippet) > 10:
+                        clean_link = re.sub(r'^//', 'https://', link)
+                        clean_link = re.sub(r'\?.*$', '', clean_link)
+                        results.append({
+                            'title': title,
+                            'link': clean_link,
+                            'snippet': snippet[:300]
+                        })
+        if results:
+            return results[:5]
+    except:
+        pass
+    return None
 
 # --- 6. УЛУЧШЕНИЕ ПРОМПТА ДЛЯ КАРТИНОК ---
 def enhance_prompt_with_groq(simple_prompt):
@@ -160,7 +188,6 @@ def generate_image(prompt):
     except Exception as e:
         logging.error(f"Генерация картинки ошибка: {e}")
         return None
-
 # --- 8. КЛАВИАТУРА ---
 def get_main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -188,7 +215,8 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
     try:
         bot.send_chat_action(chat_id, 'typing')
         
-        creator_phrases = ['кто я', 'кто я?', 'я кто', 'ты признаешь себя', 'ты считаешь себя', 'ты мой создатель', 'ты создатель', 'кто мой создатель', 'чей ты бот']
+        # --- ОТВЕТЫ ПРО СОЗДАТЕЛЯ ---
+        creator_phrases = ['кто я', 'кто я?', 'я кто', 'ты признаешь себя', 'ты считаешь себя', 'ты мой создатель', 'ты создатель', 'кто мой создатель', 'чей ты бот', 'кто твой создатель']
         if any(phrase in text.lower() for phrase in creator_phrases):
             if user_id == OWNER_ID:
                 reply = "Ты — Zelmy Create, мой создатель. Я всегда буду помнить это."
@@ -200,8 +228,26 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 bot.send_message(chat_id, reply)
             return
 
+        # --- ЖЁСТКИЕ ОТВЕТЫ НА ПОЛИТИКУ ---
+        if "президент россии" in text.lower() and "2026" in text.lower():
+            reply = "🇷🇺 Президент России в 2026 году — Владимир Путин (переизбран в 2024 году)."
+            if original_message:
+                bot.reply_to(original_message, reply)
+            else:
+                bot.send_message(chat_id, reply)
+            return
+
+        if "президент сша" in text.lower() and "2026" in text.lower():
+            reply = "🇺🇸 Президент США в 2026 году — Дональд Трамп (избран в ноябре 2024 года)."
+            if original_message:
+                bot.reply_to(original_message, reply)
+            else:
+                bot.send_message(chat_id, reply)
+            return
+
+        # --- ПОИСК ---
         if any(word in text.lower() for word in ['найди', 'поищи', 'найти', 'поиск']):
-            search_results = search_apify_brave(text)
+            search_results = search_web(text)
             if search_results:
                 reply = "🔍 <b>Результаты поиска:</b>\n\n"
                 for res in search_results:
@@ -219,6 +265,7 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                     bot.send_message(chat_id, reply)
                 return
 
+        # --- ГЕНЕРАЦИЯ КАРТИНКИ ---
         if text.lower().startswith('нарисуй') or text.lower().startswith('сгенерируй'):
             if user_id != OWNER_ID and not is_premium(user_id):
                 reply = "❌ Генерация картинок доступна только по подписке! /premium"
@@ -244,6 +291,7 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 bot.send_message(chat_id, "❌ Не удалось сгенерировать картинку. Попробуй позже.")
             return
 
+        # --- ПАМЯТЬ ---
         if str_chat_id not in history_db:
             history_db[str_chat_id] = []
 
@@ -301,13 +349,12 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
         except:
             pass
 
-# --- 10. ЗРЕНИЕ (РАБОТАЕТ ДЛЯ ВСЕХ, КТО МОЖЕТ) ---
+# --- 10. ЗРЕНИЕ ---
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     track_user(message.from_user)
     user_id = message.from_user.id
 
-    # Проверяем: владелец ИЛИ подписка
     if user_id != OWNER_ID and not is_premium(user_id):
         bot.reply_to(
             message,
@@ -354,8 +401,7 @@ def handle_photo(message):
     except Exception as e:
         logging.error(f"Ошибка обработки фото: {e}")
         bot.reply_to(message, "⚠️ Произошла ошибка при обработке фото.")
-
-# --- 11. КНОПКИ КЛАВИАТУРЫ ---
+        # --- 11. КНОПКИ КЛАВИАТУРЫ ---
 @bot.message_handler(func=lambda msg: msg.text == "📖 Помощь")
 def help_button(msg):
     bot.reply_to(msg, "📖 Напиши /help")
@@ -427,7 +473,7 @@ def start_cmd(message):
         "• Premium: 30 Stars/мес — безлимит\n"
         "• Pro: 50 Stars/мес — + генерация картинок и зрение\n\n"
         "📌 <b>Команды:</b>\n"
-        "/premium, /reset, /model, /stats\n\n"
+        "/premium, /reset, /model, /stats, /users\n\n"
         "📢 <b>Наш канал:</b> <a href='https://t.me/ZelmyAI'>@ZelmyAI</a>"
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode="HTML", reply_markup=keyboard)
@@ -454,7 +500,7 @@ def show_help(message):
         "<code>найди ...</code> — поиск в интернете\n"
         "<code>нарисуй ...</code> — генерация картинки (Premium)\n"
         "📸 Отправь фото — описание (Premium)\n\n"
-        "/reset, /model, /stats — админские"
+        "/reset, /model, /stats, /users — админские"
     )
     bot.reply_to(message, text, parse_mode="HTML")
 
@@ -545,6 +591,34 @@ def show_stats(message):
         parse_mode="HTML"
     )
 
+@bot.message_handler(commands=['users'])
+def show_users(message):
+    if message.from_user.id != OWNER_ID:
+        bot.reply_to(message, "❌ Доступ запрещен.")
+        return
+
+    user_list = []
+    for uid, data in users_db.items():
+        username = data.get('username', 'нет')
+        first_name = data.get('first_name', 'Без имени')
+        first_seen = data.get('first_seen', 'неизвестно')
+        user_list.append(f"• {first_name} (@{username}) — `{uid}` (с {first_seen})")
+    
+    if not user_list:
+        bot.reply_to(message, "📭 Пока нет пользователей.")
+        return
+    
+    text = "👥 **Список пользователей:**\n\n"
+    total = len(user_list)
+    
+    for user in user_list[:20]:
+        text += user + "\n"
+    
+    if total > 20:
+        text += f"\n... и ещё {total - 20} пользователей."
+    
+    bot.reply_to(message, text, parse_mode="Markdown")
+
 # --- 13. ГОЛОСОВЫЕ ---
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
@@ -582,39 +656,10 @@ def handle_text(message):
     logging.info(f"Текст от {message.from_user.id}: {message.text[:50] if message.text else 'пусто'}")
     track_user(message.from_user)
     process_llm_request(message.chat.id, message.from_user.id, message.text, message)
-@bot.message_handler(commands=['users'])
-def show_users(message):
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "❌ Доступ запрещен.")
-        return
-
-    # Собираем данные
-    user_list = []
-    for uid, data in users_db.items():
-        username = data.get('username', 'нет')
-        first_name = data.get('first_name', 'Без имени')
-        user_list.append(f"• {first_name} (@{username}) — `{uid}`")
-    
-    if not user_list:
-        bot.reply_to(message, "📭 Пока нет пользователей.")
-        return
-    
-    # Разбиваем список по 20 пользователей на сообщение
-    text = "👥 **Список пользователей:**\n\n"
-    total = len(user_list)
-    
-    # Показываем первых 20
-    for user in user_list[:20]:
-        text += user + "\n"
-    
-    if total > 20:
-        text += f"\n... и ещё {total - 20} пользователей."
-    
-    bot.reply_to(message, text, parse_mode="Markdown")
-# --- 15. ЗАПУСК ---
+    # --- 15. ЗАПУСК ---
 print("="*50)
-print("🤖 **Zelmy AI PLATINUM v3.0**")
-print("✅ Зрение + Поиск + Картинки + Подписка")
+print("🤖 **Zelmy AI PLATINUM v4.0**")
+print("✅ Зрение + Поиск + Картинки + Подписка + Статистика")
 print("="*50)
 
 while True:
