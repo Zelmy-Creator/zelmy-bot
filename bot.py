@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # --- 2. КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_KEY = os.getenv("GROQ_KEY")
-APIFY_KEY = os.getenv("APIFY_KEY")
+APIFY_KEY = os.getevn("APIFY_KEY")
 OWNER_ID = 8482782819
 CHANNEL_USERNAME = "@ZelmyAI"
 
@@ -160,7 +160,8 @@ def generate_image(prompt):
     except Exception as e:
         logging.error(f"Генерация картинки ошибка: {e}")
         return None
-        # --- 8. КЛАВИАТУРА ---
+
+# --- 8. КЛАВИАТУРА ---
 def get_main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     btn1 = types.KeyboardButton("📖 Помощь")
@@ -299,12 +300,14 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 bot.send_message(chat_id, error_text)
         except:
             pass
-            # --- 10. ЗРЕНИЕ ---
+
+# --- 10. ЗРЕНИЕ (РАБОТАЕТ ДЛЯ ВСЕХ, КТО МОЖЕТ) ---
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     track_user(message.from_user)
     user_id = message.from_user.id
 
+    # Проверяем: владелец ИЛИ подписка
     if user_id != OWNER_ID and not is_premium(user_id):
         bot.reply_to(
             message,
@@ -346,7 +349,8 @@ def handle_photo(message):
             reply = response.json()['choices'][0]['message']['content']
             bot.reply_to(message, f"🖼️ <b>Описание:</b>\n{reply}", parse_mode="HTML")
         else:
-            bot.reply_to(message, "❌ Не удалось распознать изображение.")
+            bot.reply_to(message, "❌ Не удалось распознать изображение. Попробуй позже.")
+            
     except Exception as e:
         logging.error(f"Ошибка обработки фото: {e}")
         bot.reply_to(message, "⚠️ Произошла ошибка при обработке фото.")
@@ -539,8 +543,9 @@ def show_stats(message):
         f"🌟 Подписок: {total_subs}\n"
         f"⚙️ Модель: {CURRENT_MODEL}",
         parse_mode="HTML"
-                )
-    # --- 13. ГОЛОСОВЫЕ ---
+    )
+
+# --- 13. ГОЛОСОВЫЕ ---
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
     logging.info(f"Голос от {message.from_user.id}")
