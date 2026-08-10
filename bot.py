@@ -6,19 +6,22 @@ import telebot
 from telebot import types
 import logging
 import re
-from bs4 import BeautifulSoup
+from datetime import datetime, timedelta
 
 # --- 1. ЛОГИРОВАНИЕ ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- 2. КОНФИГУРАЦИЯ ---
-BOT_TOKEN =  os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_KEY = os.getenv("GROQ_KEY")
-OWNER_ID = 8482782819  # Твой Telegram ID
+APIFY_KEY = os.getenv("APIFY_KEY")  # твой ключ от Apify
+OWNER_ID = 8482782819
 
 HISTORY_FILE = "chat_history.json"
 USERS_FILE = "users.json"
 MEMORY_FILE = "memory.json"
+SUBSCRIPTIONS_FILE = "subscriptions.json"
+USAGE_FILE = "usage.json"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 CURRENT_MODEL = "llama-3.1-8b-instant"
@@ -43,6 +46,8 @@ def save_json(filepath, data):
 history_db = load_json(HISTORY_FILE)
 users_db = load_json(USERS_FILE)
 memory_db = load_json(MEMORY_FILE)
+subscriptions = load_json(SUBSCRIPTIONS_FILE)
+usage_db = load_json(USAGE_FILE)
 
 def track_user(user):
     str_id = str(user.id)
@@ -68,63 +73,107 @@ def search_memory(query):
             results.append((key, value))
     return results[:3]
 
-# --- 4. ПОИСК В ИНТЕРНЕТЕ ---
-def search_duckduckgo(query):
+# --- 4. ПОДПИСКИ ---
+def is_premium(user_id):
+    user_id = str(user_id)
+    if user_id not in subscriptions:
+        return False
+    sub = subscriptions[user_id]
+    return sub.get('expires_at', 0) > time.time()
+
+def get_user_plan(user_id):
+    user_id = str(user_id)
+    if user_id not in subscriptions:
+        return "free"
+    sub = subscriptions[user_id]
+    if sub.get('expires_at', 0) < time.time():
+        return "free"
+    return sub.get('plan', 'free')
+
+def check_usage_limit(user_id):
+    if is_premium(user_id):
+        return True
+    user_id = str(user_id)
+    today = datetime.now().strftime("%Y-%m-%d")
+    if user_id not in usage_db:
+        usage_db[user_id] = {}
+    if usage_db[user_id].get('date') != today:
+        usage_db[user_id] = {'date': today, 'count': 0}
+    if usage_db[user_id]['count'] >= 5:
+        return False
+    usage_db[user_id]['count'] += 1
+    save_json(USAGE_FILE, usage_db)
+    return True
+
+# --- 5. ПОИСК ЧЕРЕЗ APIFY BRAVE ---
+def search_apify_brave(query):
     try:
-        url = f"https://lite.duckduckgo.com/lite/?q={query}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, timeout=15, headers=headers)
+        url = "https://api.apify.com/v2/acts/miroslav~brave-search/runs"
+        params = {"token": APIFY_KEY}
+        payload = {"query": query, "count": 5}
+        response = requests.post(url, json=payload, params=params, timeout=15)
         
         if response.status_code != 200:
+            logging.error(f"Apify вернул {response.status_code}")
             return None
             
-        soup = BeautifulSoup(response.text, 'html.parser')
+        data = response.json()
         results = []
         
-        for row in soup.find_all('tr'):
-            snippet_cell = row.find('td', class_='result-snippet')
-            if snippet_cell:
-                title_tag = row.find('a')
-                if title_tag:
-                    title = title_tag.get_text(strip=True)
-                    link = title_tag.get('href', '')
-                    snippet = snippet_cell.get_text(strip=True)
-                    if snippet and len(snippet) > 10:
-                        clean_link = re.sub(r'^//', 'https://', link)
-                        clean_link = re.sub(r'\?.*$', '', clean_link)
-                        results.append({
-                            'title': title,
-                            'link': clean_link,
-                            'snippet': snippet[:300]
-                        })
+        for item in data.get('data', {}).get('web', {}).get('results', []):
+            results.append({
+                'title': item.get('title', 'Без заголовка'),
+                'link': item.get('url', ''),
+                'snippet': item.get('description', '')[:300]
+            })
         
         return results[:5]
         
     except Exception as e:
-        logging.error(f"Поиск ошибка: {e}")
+        logging.error(f"Apify ошибка: {e}")
         return None
 
-# --- 5. ОСНОВНАЯ ЛОГИКА ---
+# --- 6. ГЕНЕРАЦИЯ КАРТИНОК ---
+def generate_image(prompt):
+    try:
+        url = f"https://image.pollinations.ai/prompt/{prompt.replace(' ', '%20')}"
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            return response.content
+        return None
+    except Exception as e:
+        logging.error(f"Генерация картинки ошибка: {e}")
+        return None
+
+# --- 7. ОСНОВНАЯ ЛОГИКА ---
 def process_llm_request(chat_id, user_id, text, original_message=None):
     str_chat_id = str(chat_id)
+    if not check_usage_limit(user_id) and not is_premium(user_id):
+        reply = "❌ Бесплатный лимит (5 запросов/день) исчерпан. Купи подписку: /premium"
+        if original_message:
+            bot.reply_to(original_message, reply)
+        else:
+            bot.send_message(chat_id, reply)
+        return
     try:
         bot.send_chat_action(chat_id, 'typing')
         
-        # --- ЖЁСТКИЙ ОТВЕТ НА "КТО Я" ---
-        if any(phrase in text.lower() for phrase in ['кто я', 'кто я?', 'я кто', 'я твой создатель', 'я создатель']):
+        # --- ОТВЕТЫ ПРО СОЗДАТЕЛЯ ---
+        creator_phrases = ['кто я', 'кто я?', 'я кто', 'ты признаешь себя', 'ты считаешь себя', 'ты мой создатель', 'ты создатель', 'кто мой создатель', 'чей ты бот']
+        if any(phrase in text.lower() for phrase in creator_phrases):
             if user_id == OWNER_ID:
                 reply = "Ты — Zelmy Create, мой создатель. Я всегда буду помнить это."
             else:
-                reply = "Ты — пользователь. Я создан Zelmy Create, и он мой единственный создатель."
+                reply = "Мой создатель — Zelmy Create. Он единственный, кто управляет мной."
             if original_message:
                 bot.reply_to(original_message, reply)
             else:
                 bot.send_message(chat_id, reply)
             return
 
-        # --- ПОИСК В ИНТЕРНЕТЕ (если есть "найди" или "поищи") ---
+        # --- ПОИСК ---
         if any(word in text.lower() for word in ['найди', 'поищи', 'найти', 'поиск']):
-            search_results = search_duckduckgo(text)
+            search_results = search_apify_brave(text)
             if search_results:
                 reply = "🔍 **Результаты поиска:**\n\n"
                 for res in search_results:
@@ -142,7 +191,32 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                     bot.send_message(chat_id, reply)
                 return
 
-        # --- ЗАПОМИНАНИЕ ДЛЯ ВЛАДЕЛЬЦА ---
+        # --- ГЕНЕРАЦИЯ КАРТИНКИ ---
+        if text.lower().startswith('нарисуй') or text.lower().startswith('сгенерируй'):
+            if not is_premium(user_id):
+                reply = "❌ Генерация картинок доступна только по подписке! /premium"
+                if original_message:
+                    bot.reply_to(original_message, reply)
+                else:
+                    bot.send_message(chat_id, reply)
+                return
+            prompt = text[8:].strip()
+            if not prompt:
+                reply = "❌ Напиши, что нарисовать: `нарисуй кота`"
+                if original_message:
+                    bot.reply_to(original_message, reply)
+                else:
+                    bot.send_message(chat_id, reply)
+                return
+            bot.send_message(chat_id, "🎨 Генерирую картинку... Подожди 5-10 секунд.")
+            image_data = generate_image(prompt)
+            if image_data:
+                bot.send_photo(chat_id, image_data, caption=f"🖼️ Сгенерировано по запросу: {prompt}")
+            else:
+                bot.send_message(chat_id, "❌ Не удалось сгенерировать картинку. Попробуй позже.")
+            return
+
+        # --- ЗАПОМИНАНИЕ ---
         if text.lower().startswith('запомни') and user_id == OWNER_ID:
             content = text[7:].strip()
             separators = [' — ', ' - ', ', ', ': ']
@@ -172,22 +246,19 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 bot.send_message(chat_id, reply)
             return
 
-        # --- ПОИСК В ПАМЯТИ ---
+        # --- ПАМЯТЬ ---
         memory_results = search_memory(text)
-        memory_context = ""
         if memory_results:
-            memory_context = "\n\n📚 **Я помню:**\n"
+            reply = "📚 **Я помню:**\n"
             for key, value in memory_results[:3]:
-                memory_context += f"• **{key}** → {value}\n"
-
-        if memory_results:
+                reply += f"• **{key}** → {value}\n"
             if original_message:
-                bot.reply_to(original_message, memory_context)
+                bot.reply_to(original_message, reply)
             else:
-                bot.send_message(chat_id, memory_context)
+                bot.send_message(chat_id, reply)
             return
 
-        # --- ЕСЛИ НЕТ В ПАМЯТИ, ИСПОЛЬЗУЕМ GROQ ---
+        # --- GROQ ---
         if str_chat_id not in history_db:
             history_db[str_chat_id] = []
 
@@ -243,7 +314,23 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
         except:
             pass
 
-# --- 6. КОМАНДЫ ---
+# --- 8. ПЛАТЕЖИ ---
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def pre_checkout(pre_checkout_query):
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@bot.message_handler(content_types=['successful_payment'])
+def successful_payment(message):
+    user_id = str(message.from_user.id)
+    plan = message.successful_payment.invoice_payload
+    if plan == "premium":
+        subscriptions[user_id] = {'plan': 'premium', 'expires_at': time.time() + 30 * 24 * 60 * 60}
+    elif plan == "pro":
+        subscriptions[user_id] = {'plan': 'pro', 'expires_at': time.time() + 30 * 24 * 60 * 60}
+    save_json(SUBSCRIPTIONS_FILE, subscriptions)
+    bot.send_message(message.chat.id, f"✅ Подписка **{plan}** активирована на 30 дней! Спасибо!")
+
+# --- 9. КОМАНДЫ ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     logging.info(f"Start от {message.from_user.id}")
@@ -254,56 +341,76 @@ def start_cmd(message):
 
     if message.from_user.id == OWNER_ID:
         welcome = (
-            "🔥 **Zelmy AI — ГИБРИДНЫЙ РЕЖИМ**\n\n"
-            "📌 **Как я работаю:**\n"
-            "1. Сначала ищу в твоей памяти\n"
-            "2. Если не нахожу — использую ИИ (Groq)\n"
-            "3. Если есть слово 'найди' — ищу в интернете\n\n"
-            "📌 **Ты можешь:**\n"
-            "• Запоминать факты: `запомни: вопрос — ответ`\n"
+            "🔥 **Zelmy AI — PLATINUM**\n\n"
+            "📌 **Что я умею:**\n"
             "• Искать в интернете: `найди ...`\n"
-            "• Получать ответы от ИИ на любые вопросы\n\n"
+            "• Генерировать картинки: `нарисуй ...`\n"
+            "• Запоминать факты: `запомни: ...`\n"
+            "• Отвечать на любые вопросы (Groq)\n\n"
+            "💰 **Подписка:**\n"
+            "• Бесплатно: 5 запросов/день\n"
+            "• Premium: 30 Stars/мес — безлимит\n"
+            "• Pro: 50 Stars/мес — + генерация картинок\n\n"
             "📌 **Команды:**\n"
-            "/reset — очистить историю\n"
-            "/model — сменить модель\n"
-            "/stats — статистика\n"
-            "/forget — удалить ВСЮ память\n"
-            "/show_memory — показать твою память"
+            "/premium, /reset, /model, /stats, /forget, /show_memory"
         )
     else:
         welcome = (
             "🌱 **Zelmy AI**\n\n"
-            "Я отвечаю на вопросы, используя мощный ИИ и интернет.\n"
-            "Мой создатель постоянно учит меня новому.\n\n"
-            "📌 **Просто задай вопрос** — я постараюсь ответить."
+            "Я отвечаю на вопросы, ищу в интернете и генерирую картинки.\n\n"
+            "💰 **Бесплатно:** 5 запросов/день\n"
+            "🌟 **Премиум:** безлимит за 30 Stars/мес\n\n"
+            "📌 **Команды:**\n"
+            "/premium — купить подписку"
         )
-
     bot.reply_to(message, welcome)
 
 @bot.message_handler(commands=['help'])
 def show_help(message):
-    if message.from_user.id == OWNER_ID:
-        text = (
-            "🤖 **Команды владельца:**\n"
-            "/start — перезапустить\n"
-            "/reset — очистить историю\n"
-            "/model — сменить модель (8B/70B)\n"
-            "/stats — статистика\n"
-            "/show_memory — показать всю память\n"
-            "/forget — удалить ВСЮ память\n\n"
-            "📌 **Как запомнить:**\n"
-            "`запомни: вопрос — ответ`\n\n"
-            "📌 **Как искать:**\n"
-            "`найди ...` или `поищи ...`"
-        )
-    else:
-        text = (
-            "🤖 **Команды:**\n"
-            "/start — перезапустить\n\n"
-            "📌 **Как это работает:**\n"
-            "Я использую мощный ИИ и интернет, чтобы отвечать на твои вопросы."
-        )
+    text = (
+        "🤖 **Команды Zelmy AI:**\n\n"
+        "/start — перезапустить\n"
+        "/premium — тарифы и подписка\n\n"
+        "`найди ...` — поиск в интернете\n"
+        "`нарисуй ...` — генерация картинки (Premium)\n"
+        "`запомни: ...` — запомнить факт (только владелец)\n\n"
+        "/reset, /model, /stats, /forget, /show_memory — админские"
+    )
     bot.reply_to(message, text)
+
+@bot.message_handler(commands=['premium'])
+def premium_cmd(message):
+    user_id = message.from_user.id
+    plan = get_user_plan(user_id)
+    if plan != "free":
+        bot.reply_to(message, f"🌟 У тебя уже есть подписка **{plan}**")
+        return
+    text = "🌟 **Zelmy AI Premium**\n\n💰 **Тарифы:**\n• 30 Stars/мес — Premium\n• 50 Stars/мес — Pro\n\n📌 Нажми на кнопку ниже для оплаты."
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("💎 30 Stars — Premium", callback_data="buy_premium"))
+    markup.add(types.InlineKeyboardButton("🌟 50 Stars — Pro", callback_data="buy_pro"))
+    bot.reply_to(message, text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data in ['buy_premium', 'buy_pro'])
+def handle_purchase(call):
+    plan = call.data.split('_')[1]
+    price = 30 if plan == "premium" else 50
+    title = "Zelmy AI Premium" if plan == "premium" else "Zelmy AI Pro"
+    desc = "Безлимит запросов и поиска" if plan == "premium" else "Всё из Premium + генерация картинок"
+    try:
+        bot.send_invoice(
+            call.message.chat.id,
+            title=title,
+            description=desc,
+            invoice_payload=plan,
+            provider_token="",
+            currency="XTR",
+            prices=[{"label": "Подписка на 30 дней", "amount": price}],
+            start_parameter="sub"
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"Ошибка: {e}", show_alert=True)
 
 @bot.message_handler(commands=['model'])
 def switch_model(message):
@@ -360,14 +467,25 @@ def show_stats(message):
         return
     total_users = len(users_db)
     total_memory = len(memory_db)
+    total_subs = len(subscriptions)
     bot.reply_to(message,
         f"📊 **Статистика:**\n"
         f"👤 Пользователей: {total_users}\n"
         f"🧠 Фактов в памяти: {total_memory}\n"
+        f"🌟 Подписок: {total_subs}\n"
         f"⚙️ Модель: {CURRENT_MODEL}"
     )
 
-# --- 7. ГОЛОСОВЫЕ ---
+# --- 10. ФОТО ---
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    track_user(message.from_user)
+    if not is_premium(message.from_user.id):
+        bot.reply_to(message, "❌ Обработка фото доступна только по подписке! /premium")
+        return
+    bot.reply_to(message, "📸 Фото получено. Обработка будет добавлена позже.")
+
+# --- 11. ГОЛОСОВЫЕ ---
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
     logging.info(f"Голос от {message.from_user.id}")
@@ -398,17 +516,17 @@ def handle_voice(message):
         if os.path.exists(voice_path):
             os.remove(voice_path)
 
-# --- 8. ТЕКСТ ---
+# --- 12. ТЕКСТ ---
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     logging.info(f"Текст от {message.from_user.id}: {message.text[:50] if message.text else 'пусто'}")
     track_user(message.from_user)
     process_llm_request(message.chat.id, message.from_user.id, message.text, message)
 
-# --- 9. ЗАПУСК ---
+# --- 13. ЗАПУСК ---
 print("="*50)
-print("🤖 **Zelmy AI — С ПОИСКОМ В ИНТЕРНЕТЕ**")
-print("✅ Память + Groq + DuckDuckGo")
+print("🤖 **Zelmy AI — PLATINUM (APIFY)**")
+print("✅ Поиск через Apify Brave")
 print("="*50)
 
 while True:
@@ -417,4 +535,4 @@ while True:
     except Exception as e:
         logging.error(f"Сбой: {e}")
         print(f"⚠️ Переподключение через 5 секунд...")
-        time.sleep(5)    
+        time.sleep(5)                            
