@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # --- 2. КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_KEY = os.getenv("GROQ_KEY")
-APIFY_KEY = os.getevn("APIFY_KEY")
+APIFY_KEY = os.getenv("APIFY_KEY")
 OWNER_ID = 8482782819
 CHANNEL_USERNAME = "@ZelmyAI"
 
