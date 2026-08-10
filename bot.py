@@ -582,7 +582,35 @@ def handle_text(message):
     logging.info(f"Текст от {message.from_user.id}: {message.text[:50] if message.text else 'пусто'}")
     track_user(message.from_user)
     process_llm_request(message.chat.id, message.from_user.id, message.text, message)
+@bot.message_handler(commands=['users'])
+def show_users(message):
+    if message.from_user.id != OWNER_ID:
+        bot.reply_to(message, "❌ Доступ запрещен.")
+        return
 
+    # Собираем данные
+    user_list = []
+    for uid, data in users_db.items():
+        username = data.get('username', 'нет')
+        first_name = data.get('first_name', 'Без имени')
+        user_list.append(f"• {first_name} (@{username}) — `{uid}`")
+    
+    if not user_list:
+        bot.reply_to(message, "📭 Пока нет пользователей.")
+        return
+    
+    # Разбиваем список по 20 пользователей на сообщение
+    text = "👥 **Список пользователей:**\n\n"
+    total = len(user_list)
+    
+    # Показываем первых 20
+    for user in user_list[:20]:
+        text += user + "\n"
+    
+    if total > 20:
+        text += f"\n... и ещё {total - 20} пользователей."
+    
+    bot.reply_to(message, text, parse_mode="Markdown")
 # --- 15. ЗАПУСК ---
 print("="*50)
 print("🤖 **Zelmy AI PLATINUM v3.0**")
