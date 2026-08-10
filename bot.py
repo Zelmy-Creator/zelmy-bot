@@ -6,6 +6,7 @@ import telebot
 from telebot import types
 import logging
 import re
+import base64
 from datetime import datetime, timedelta
 
 # --- 1. ЛОГИРОВАНИЕ ---
@@ -14,12 +15,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # --- 2. КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_KEY = os.getenv("GROQ_KEY")
-APIFY_KEY = os.getenv("APIFY_KEY")  # твой ключ от Apify
-OWNER_ID = 8482782819  # ТВОЙ ID
+APIFY_KEY = os.getenv("APIFY_KEY")
+OWNER_ID = 8482782819
+CHANNEL_USERNAME = "@ZelmyAI"
 
 HISTORY_FILE = "chat_history.json"
 USERS_FILE = "users.json"
-MEMORY_FILE = "memory.json"
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 USAGE_FILE = "usage.json"
 
@@ -45,7 +46,6 @@ def save_json(filepath, data):
 
 history_db = load_json(HISTORY_FILE)
 users_db = load_json(USERS_FILE)
-memory_db = load_json(MEMORY_FILE)
 subscriptions = load_json(SUBSCRIPTIONS_FILE)
 usage_db = load_json(USAGE_FILE)
 
@@ -56,22 +56,6 @@ def track_user(user):
         "first_name": user.first_name or "Без имени"
     }
     save_json(USERS_FILE, users_db)
-
-def get_memory():
-    return memory_db
-
-def save_memory(key, value):
-    memory_db[key.lower()] = value
-    save_json(MEMORY_FILE, memory_db)
-    logging.info(f"🧠 Запомнил: {key} → {value}")
-
-def search_memory(query):
-    results = []
-    query_lower = query.lower()
-    for key, value in memory_db.items():
-        if query_lower in key:
-            results.append((key, value))
-    return results[:3]
 
 # --- 4. ПОДПИСКИ ---
 def is_premium(user_id):
@@ -91,7 +75,7 @@ def get_user_plan(user_id):
     return sub.get('plan', 'free')
 
 def check_usage_limit(user_id):
-    if is_premium(user_id):
+    if user_id == OWNER_ID or is_premium(user_id):
         return True
     user_id = str(user_id)
     today = datetime.now().strftime("%Y-%m-%d")
@@ -105,6 +89,22 @@ def check_usage_limit(user_id):
     save_json(USAGE_FILE, usage_db)
     return True
 
+def get_subscription_reminder(user_id):
+    user_id = str(user_id)
+    if user_id not in subscriptions:
+        return None
+    sub = subscriptions[user_id]
+    expires_at = sub.get('expires_at', 0)
+    days_left = (expires_at - time.time()) / 86400
+
+    if days_left < 0:
+        return "❌ Твоя подписка истекла. Чтобы продлить — напиши /premium"
+    if days_left <= 1:
+        return "⚠️ Братан, у тебя последний день подписки! Продли её, чтобы не потерять доступ: /premium"
+    if days_left <= 3:
+        return f"⏳ Напоминаю: твоя подписка истекает через {round(days_left)} дня. Продли её: /premium"
+    return None
+
 # --- 5. ПОИСК ЧЕРЕЗ APIFY BRAVE ---
 def search_apify_brave(query):
     try:
@@ -112,31 +112,48 @@ def search_apify_brave(query):
         params = {"token": APIFY_KEY}
         payload = {"query": query, "count": 5}
         response = requests.post(url, json=payload, params=params, timeout=15)
-        
         if response.status_code != 200:
-            logging.error(f"Apify вернул {response.status_code}")
             return None
-            
         data = response.json()
         results = []
-        
         for item in data.get('data', {}).get('web', {}).get('results', []):
             results.append({
                 'title': item.get('title', 'Без заголовка'),
                 'link': item.get('url', ''),
                 'snippet': item.get('description', '')[:300]
             })
-        
         return results[:5]
-        
     except Exception as e:
         logging.error(f"Apify ошибка: {e}")
         return None
 
-# --- 6. ГЕНЕРАЦИЯ КАРТИНОК ---
+# --- 6. УЛУЧШЕНИЕ ПРОМПТА ДЛЯ КАРТИНОК ---
+def enhance_prompt_with_groq(simple_prompt):
+    try:
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.1-8b-instant",
+                "messages": [
+                    {"role": "system", "content": "Ты — эксперт по написанию промптов для нейросетей. Преврати простой запрос пользователя в подробный, качественный промпт для генерации изображений. Добавь детали, стиль, освещение, качество. Не добавляй людей."},
+                    {"role": "user", "content": f"Улучши этот запрос для генерации картинки: {simple_prompt}"}
+                ],
+                "temperature": 0.7
+            },
+            timeout=10
+        )
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content']
+        return simple_prompt
+    except:
+        return simple_prompt
+
+# --- 7. ГЕНЕРАЦИЯ КАРТИНОК ---
 def generate_image(prompt):
     try:
-        url = f"https://image.pollinations.ai/prompt/{prompt.replace(' ', '%20')}"
+        safe_prompt = f"realistic, high quality, detailed, no people, no nudity, safe: {prompt}"
+        url = f"https://image.pollinations.ai/prompt/{safe_prompt.replace(' ', '%20')}?safe=true"
         response = requests.get(url, timeout=30)
         if response.status_code == 200:
             return response.content
@@ -145,11 +162,22 @@ def generate_image(prompt):
         logging.error(f"Генерация картинки ошибка: {e}")
         return None
 
-# --- 7. ОСНОВНАЯ ЛОГИКА ---
+# --- 8. КЛАВИАТУРА ---
+def get_main_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    btn1 = types.KeyboardButton("📖 Помощь")
+    btn2 = types.KeyboardButton("🌟 Премиум")
+    btn3 = types.KeyboardButton("🔍 Найди")
+    btn4 = types.KeyboardButton("🎨 Нарисуй")
+    btn5 = types.KeyboardButton("📸 Фото")
+    btn6 = types.KeyboardButton("🗑 Сброс")
+    keyboard.add(btn1, btn2, btn3, btn4, btn5, btn6)
+    return keyboard
+
+# --- 9. ОСНОВНАЯ ЛОГИКА ---
 def process_llm_request(chat_id, user_id, text, original_message=None):
     str_chat_id = str(chat_id)
     
-    # Проверка лимита для обычных пользователей
     if not check_usage_limit(user_id) and not is_premium(user_id):
         reply = "❌ Бесплатный лимит (5 запросов/день) исчерпан. Купи подписку: /premium"
         if original_message:
@@ -196,7 +224,6 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
 
         # --- ГЕНЕРАЦИЯ КАРТИНКИ ---
         if text.lower().startswith('нарисуй') or text.lower().startswith('сгенерируй'):
-            # Проверка: если это не владелец И нет подписки — блокируем
             if user_id != OWNER_ID and not is_premium(user_id):
                 reply = "❌ Генерация картинок доступна только по подписке! /premium"
                 if original_message:
@@ -204,7 +231,6 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 else:
                     bot.send_message(chat_id, reply)
                 return
-
             prompt = text[8:].strip()
             if not prompt:
                 reply = "❌ Напиши, что нарисовать: `нарисуй кота`"
@@ -213,73 +239,28 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 else:
                     bot.send_message(chat_id, reply)
                 return
-
             bot.send_message(chat_id, "🎨 Генерирую картинку... Подожди 5-10 секунд.")
-            image_data = generate_image(prompt)
+            enhanced_prompt = enhance_prompt_with_groq(prompt)
+            image_data = generate_image(enhanced_prompt)
             if image_data:
                 bot.send_photo(chat_id, image_data, caption=f"🖼️ Сгенерировано по запросу: {prompt}")
             else:
                 bot.send_message(chat_id, "❌ Не удалось сгенерировать картинку. Попробуй позже.")
             return
 
-        # --- ЗАПОМИНАНИЕ ---
-        if text.lower().startswith('запомни') and user_id == OWNER_ID:
-            content = text[7:].strip()
-            separators = [' — ', ' - ', ', ', ': ']
-            key, value = None, None
-            for sep in separators:
-                if sep in content:
-                    parts = content.split(sep, 1)
-                    key = parts[0].strip()
-                    value = parts[1].strip()
-                    break
-            if key is None:
-                key = content
-                value = "✅ Запомнено"
-            save_memory(key, value)
-            reply = f"🧠 Запомнил: **{key}** → {value}"
-            if original_message:
-                bot.reply_to(original_message, reply)
-            else:
-                bot.send_message(chat_id, reply)
-            return
-
-        if text.lower().startswith('запомни') and user_id != OWNER_ID:
-            reply = "🧠 Я принимаю знания только от своего создателя."
-            if original_message:
-                bot.reply_to(original_message, reply)
-            else:
-                bot.send_message(chat_id, reply)
-            return
-
-        # --- ПАМЯТЬ ---
-        memory_results = search_memory(text)
-        if memory_results:
-            reply = "📚 **Я помню:**\n"
-            for key, value in memory_results[:3]:
-                reply += f"• **{key}** → {value}\n"
-            if original_message:
-                bot.reply_to(original_message, reply)
-            else:
-                bot.send_message(chat_id, reply)
-            return
-
-        # --- GROQ ---
+        # --- ИСТОРИЯ + ПАМЯТЬ ---
         if str_chat_id not in history_db:
             history_db[str_chat_id] = []
 
-        text = re.sub(r'основан на', 'основал', text, flags=re.IGNORECASE)
-        text = re.sub(r'кто основан', 'кто основал', text, flags=re.IGNORECASE)
+        history_db[str_chat_id].append({"role": "user", "content": text})
+        if len(history_db[str_chat_id]) > 100:
+            history_db[str_chat_id] = history_db[str_chat_id][-100:]
 
         sys_prompt = {"role": "system", "content": (
             "Ты — Zelmy AI, мощный ИИ-ассистент.\n"
             "Отвечай развернуто, используя свои знания.\n"
             "Если не знаешь — честно скажи 'я не знаю'."
         )}
-
-        history_db[str_chat_id].append({"role": "user", "content": text})
-        if len(history_db[str_chat_id]) > 50:
-            history_db[str_chat_id] = history_db[str_chat_id][-50:]
 
         payload = [sys_prompt] + history_db[str_chat_id]
 
@@ -298,6 +279,12 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
             reply = response.json()['choices'][0]['message']['content']
             history_db[str_chat_id].append({"role": "assistant", "content": reply})
             save_json(HISTORY_FILE, history_db)
+            
+            # --- НАПОМИНАНИЕ О ПОДПИСКЕ ---
+            reminder = get_subscription_reminder(user_id)
+            if reminder:
+                reply += f"\n\n{reminder}"
+            
             if original_message:
                 bot.reply_to(original_message, reply)
             else:
@@ -320,23 +307,83 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
         except:
             pass
 
-# --- 8. ПЛАТЕЖИ ---
-@bot.pre_checkout_query_handler(func=lambda query: True)
-def pre_checkout(pre_checkout_query):
-    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+# --- 10. ЗРЕНИЕ (ТОЛЬКО ДЛЯ ПОДПИСАННЫХ) ---
+@bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    track_user(message.from_user)
+    user_id = message.from_user.id
 
-@bot.message_handler(content_types=['successful_payment'])
-def successful_payment(message):
-    user_id = str(message.from_user.id)
-    plan = message.successful_payment.invoice_payload
-    if plan == "premium":
-        subscriptions[user_id] = {'plan': 'premium', 'expires_at': time.time() + 30 * 24 * 60 * 60}
-    elif plan == "pro":
-        subscriptions[user_id] = {'plan': 'pro', 'expires_at': time.time() + 30 * 24 * 60 * 60}
-    save_json(SUBSCRIPTIONS_FILE, subscriptions)
-    bot.send_message(message.chat.id, f"✅ Подписка **{plan}** активирована на 30 дней! Спасибо!")
+    if user_id != OWNER_ID and not is_premium(user_id):
+        bot.reply_to(
+            message,
+            "📸 **Зрение доступно только по подписке!**\n\n"
+            "Оформи Premium за 30 Stars/месяц и я смогу:\n"
+            "• Описывать картинки\n"
+            "• Отвечать на вопросы по фото\n"
+            "• Распознавать текст на изображениях\n\n"
+            "👉 /premium — чтобы оформить подписку"
+        )
+        return
 
-# --- 9. КОМАНДЫ ---
+    bot.reply_to(message, "📸 Анализирую изображение... Подожди пару секунд.")
+    try:
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        image_base64 = base64.b64encode(downloaded_file).decode('utf-8')
+        
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "qwen/qwen3.6-27b",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Опиши, что изображено на этой картинке, подробно, но кратко (до 5 предложений)."},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                        ]
+                    }
+                ]
+            },
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            reply = response.json()['choices'][0]['message']['content']
+            bot.reply_to(message, f"🖼️ **Описание:**\n{reply}")
+        else:
+            bot.reply_to(message, "❌ Не удалось распознать изображение.")
+    except Exception as e:
+        logging.error(f"Ошибка обработки фото: {e}")
+        bot.reply_to(message, "⚠️ Произошла ошибка при обработке фото.")
+
+# --- 11. КНОПКИ КЛАВИАТУРЫ ---
+@bot.message_handler(func=lambda msg: msg.text == "📖 Помощь")
+def help_button(msg):
+    bot.reply_to(msg, "📖 Напиши /help")
+
+@bot.message_handler(func=lambda msg: msg.text == "🌟 Премиум")
+def premium_button(msg):
+    premium_cmd(msg)
+
+@bot.message_handler(func=lambda msg: msg.text == "🔍 Найди")
+def search_button(msg):
+    bot.reply_to(msg, "✏️ Напиши: `найди ...`")
+
+@bot.message_handler(func=lambda msg: msg.text == "🎨 Нарисуй")
+def draw_button(msg):
+    bot.reply_to(msg, "✏️ Напиши: `нарисуй ...`")
+
+@bot.message_handler(func=lambda msg: msg.text == "📸 Фото")
+def photo_button(msg):
+    bot.reply_to(msg, "📸 Отправь мне фото, и я опишу его (доступно по подписке)")
+
+@bot.message_handler(func=lambda msg: msg.text == "🗑 Сброс")
+def reset_button(msg):
+    reset_history(msg)
+
+# --- 12. КОМАНДЫ ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     logging.info(f"Start от {message.from_user.id}")
@@ -345,31 +392,62 @@ def start_cmd(message):
     history_db[str_chat_id] = []
     save_json(HISTORY_FILE, history_db)
 
-    if message.from_user.id == OWNER_ID:
-        welcome = (
-            "🔥 **Zelmy AI — PLATINUM**\n\n"
-            "📌 **Что я умею:**\n"
-            "• Искать в интернете: `найди ...`\n"
+    # --- ПРОВЕРКА ПОДПИСКИ НА КАНАЛ ---
+    try:
+        member = bot.get_chat_member(CHANNEL_USERNAME, message.from_user.id)
+        is_subscribed = member.status in ['creator', 'administrator', 'member']
+    except:
+        is_subscribed = False
+
+    if not is_subscribed and message.from_user.id != OWNER_ID:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("📢 Подписаться на канал", url="https://t.me/ZelmyAI"))
+        markup.add(types.InlineKeyboardButton("✅ Я подписался", callback_data="check_sub"))
+        welcome_text = (
+            "👋 **Привет, я Zelmy AI!**\n\n"
+            "Я — твой мощный ИИ-помощник с доступом к интернету.\n\n"
+            "🤖 **Что я умею:**\n"
+            "• Отвечать на любые вопросы (ИИ Groq)\n"
+            "• Искать информацию: `найди ...`\n"
             "• Генерировать картинки: `нарисуй ...`\n"
-            "• Запоминать факты: `запомни: ...`\n"
-            "• Отвечать на любые вопросы (Groq)\n\n"
-            "💰 **Подписка:**\n"
-            "• Бесплатно: 5 запросов/день\n"
-            "• Premium: 30 Stars/мес — безлимит\n"
-            "• Pro: 50 Stars/мес — + генерация картинок\n\n"
-            "📌 **Команды:**\n"
-            "/premium, /reset, /model, /stats, /forget, /show_memory"
+            "• Распознавать фото (по подписке)\n\n"
+            "👨‍💻 **Мой создатель:** @ZelmyCreate\n\n"
+            "📢 **Чтобы пользоваться ботом, подпишись на канал:**"
         )
-    else:
-        welcome = (
-            "🌱 **Zelmy AI**\n\n"
-            "Я отвечаю на вопросы, ищу в интернете и генерирую картинки.\n\n"
-            "💰 **Бесплатно:** 5 запросов/день\n"
-            "🌟 **Премиум:** безлимит за 30 Stars/мес\n\n"
-            "📌 **Команды:**\n"
-            "/premium — купить подписку"
-        )
-    bot.reply_to(message, welcome)
+        bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=markup)
+        return
+
+    keyboard = get_main_keyboard()
+    welcome_text = (
+        "🔥 **Zelmy AI — ПЛАТИНОВАЯ ВЕРСИЯ**\n\n"
+        "📌 **Что я умею:**\n"
+        "• Искать в интернете: `найди ...`\n"
+        "• Генерировать картинки: `нарисуй ...`\n"
+        "• Распознавать фото (по подписке)\n"
+        "• Отвечать на любые вопросы (Groq)\n"
+        "• Помнить до 100 сообщений диалога\n\n"
+        "💰 **Подписка:**\n"
+        "• Бесплатно: 5 запросов/день\n"
+        "• Premium: 30 Stars/мес — безлимит\n"
+        "• Pro: 50 Stars/мес — + генерация картинок и зрение\n\n"
+        "📌 **Команды:**\n"
+        "/premium, /reset, /model, /stats, /forget, /show_memory\n\n"
+        "📢 **Наш канал:** [@ZelmyAI](https://t.me/ZelmyAI)"
+    )
+    bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=keyboard)
+
+@bot.callback_query_handler(func=lambda call: call.data == "check_sub")
+def callback_check_sub(call):
+    try:
+        member = bot.get_chat_member(CHANNEL_USERNAME, call.from_user.id)
+        if member.status in ['creator', 'administrator', 'member']:
+            bot.answer_callback_query(call.id, "✅ Подписка подтверждена!")
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            start_cmd(call.message)
+        else:
+            bot.answer_callback_query(call.id, "❌ Ты ещё не подписался!", show_alert=True)
+    except:
+        bot.answer_callback_query(call.id, "❌ Ошибка проверки.", show_alert=True)
 
 @bot.message_handler(commands=['help'])
 def show_help(message):
@@ -379,7 +457,7 @@ def show_help(message):
         "/premium — тарифы и подписка\n\n"
         "`найди ...` — поиск в интернете\n"
         "`нарисуй ...` — генерация картинки (Premium)\n"
-        "`запомни: ...` — запомнить факт (только владелец)\n\n"
+        "📸 Отправь фото — описание (Premium)\n\n"
         "/reset, /model, /stats, /forget, /show_memory — админские"
     )
     bot.reply_to(message, text)
@@ -402,7 +480,7 @@ def handle_purchase(call):
     plan = call.data.split('_')[1]
     price = 30 if plan == "premium" else 50
     title = "Zelmy AI Premium" if plan == "premium" else "Zelmy AI Pro"
-    desc = "Безлимит запросов и поиска" if plan == "premium" else "Всё из Premium + генерация картинок"
+    desc = "Безлимит запросов и поиска" if plan == "premium" else "Всё из Premium + генерация картинок и зрение"
     try:
         bot.send_invoice(
             call.message.chat.id,
@@ -418,53 +496,20 @@ def handle_purchase(call):
     except Exception as e:
         bot.answer_callback_query(call.id, f"Ошибка: {e}", show_alert=True)
 
-@bot.message_handler(commands=['model'])
-def switch_model(message):
-    global CURRENT_MODEL
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "❌ Только создатель.")
-        return
-    if CURRENT_MODEL == "llama-3.1-8b-instant":
-        CURRENT_MODEL = "llama-3.3-70b-versatile"
-        bot.reply_to(message, "✅ 70B модель")
-    else:
-        CURRENT_MODEL = "llama-3.1-8b-instant"
-        bot.reply_to(message, "✅ 8B модель")
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def pre_checkout(pre_checkout_query):
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
-@bot.message_handler(commands=['reset'])
-def reset_history(message):
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "❌ Только создатель.")
-        return
-    str_chat_id = str(message.chat.id)
-    history_db[str_chat_id] = []
-    save_json(HISTORY_FILE, history_db)
-    bot.reply_to(message, "🧹 История очищена!")
-
-@bot.message_handler(commands=['forget'])
-def forget_memory(message):
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "❌ Только создатель.")
-        return
-    global memory_db
-    memory_db = {}
-    save_json(MEMORY_FILE, memory_db)
-    bot.reply_to(message, "🧠 Вся память удалена!")
-
-@bot.message_handler(commands=['show_memory'])
-def show_memory(message):
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "❌ Только создатель.")
-        return
-    if not memory_db:
-        bot.reply_to(message, "📭 Память пуста.")
-        return
-    text = "🧠 **Вся память:**\n\n"
-    for key, value in list(memory_db.items())[:50]:
-        text += f"• **{key}** → {value}\n"
-    if len(memory_db) > 50:
-        text += f"\n... и ещё {len(memory_db) - 50} фактов."
-    bot.reply_to(message, text)
+@bot.message_handler(content_types=['successful_payment'])
+def successful_payment(message):
+    user_id = str(message.from_user.id)
+    plan = message.successful_payment.invoice_payload
+    if plan == "premium":
+        subscriptions[user_id] = {'plan': 'premium', 'expires_at': time.time() + 30 * 24 * 60 * 60}
+    elif plan == "pro":
+        subscriptions[user_id] = {'plan': 'pro', 'expires_at': time.time() + 30 * 24 * 60 * 60}
+    save_json(SUBSCRIPTIONS_FILE, subscriptions)
+    bot.send_message(message.chat.id, f"✅ Подписка **{plan}** активирована на 30 дней! Спасибо!")
 
 @bot.message_handler(commands=['stats'])
 def show_stats(message):
@@ -472,26 +517,15 @@ def show_stats(message):
         bot.reply_to(message, "❌ Доступ запрещен.")
         return
     total_users = len(users_db)
-    total_memory = len(memory_db)
     total_subs = len(subscriptions)
     bot.reply_to(message,
         f"📊 **Статистика:**\n"
         f"👤 Пользователей: {total_users}\n"
-        f"🧠 Фактов в памяти: {total_memory}\n"
         f"🌟 Подписок: {total_subs}\n"
         f"⚙️ Модель: {CURRENT_MODEL}"
     )
 
-# --- 10. ФОТО ---
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-    track_user(message.from_user)
-    if not is_premium(message.from_user.id):
-        bot.reply_to(message, "❌ Обработка фото доступна только по подписке! /premium")
-        return
-    bot.reply_to(message, "📸 Фото получено. Обработка будет добавлена позже.")
-
-# --- 11. ГОЛОСОВЫЕ ---
+# --- 13. ГОЛОСОВЫЕ ---
 @bot.message_handler(content_types=['voice'])
 def handle_voice(message):
     logging.info(f"Голос от {message.from_user.id}")
@@ -522,17 +556,17 @@ def handle_voice(message):
         if os.path.exists(voice_path):
             os.remove(voice_path)
 
-# --- 12. ТЕКСТ ---
+# --- 14. ТЕКСТ ---
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
     logging.info(f"Текст от {message.from_user.id}: {message.text[:50] if message.text else 'пусто'}")
     track_user(message.from_user)
     process_llm_request(message.chat.id, message.from_user.id, message.text, message)
 
-# --- 13. ЗАПУСК ---
+# --- 15. ЗАПУСК ---
 print("="*50)
-print("🤖 **Zelmy AI — PLATINUM (APIFY)**")
-print("✅ Поиск через Apify Brave")
+print("🤖 **Zelmy AI PLATINUM v3.0**")
+print("✅ Зрение + Поиск + Картинки + Подписка")
 print("="*50)
 
 while True:
@@ -541,5 +575,4 @@ while True:
     except Exception as e:
         logging.error(f"Сбой: {e}")
         print(f"⚠️ Переподключение через 5 секунд...")
-        time.sleep(5)    
-                                                   
+        time.sleep(5)                                            
