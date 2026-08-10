@@ -8,6 +8,9 @@ import logging
 import re
 import base64
 from datetime import datetime, timedelta
+import threading
+from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS
 
 # --- 1. ЛОГИРОВАНИЕ ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -16,6 +19,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_KEY = os.getenv("GROQ_KEY")
 APIFY_KEY = os.getenv("APIFY_KEY")
+HF_KEY = os.getenv("HF_KEY")
 OWNER_ID = 8482782819
 CHANNEL_USERNAME = "@ZelmyAI"
 
@@ -23,6 +27,7 @@ HISTORY_FILE = "chat_history.json"
 USERS_FILE = "users.json"
 SUBSCRIPTIONS_FILE = "subscriptions.json"
 USAGE_FILE = "usage.json"
+REACTIONS_FILE = "reactions.json"
 
 bot = telebot.TeleBot(BOT_TOKEN)
 CURRENT_MODEL = "llama-3.1-8b-instant"
@@ -98,112 +103,134 @@ def get_subscription_reminder(user_id):
     expires_at = sub.get('expires_at', 0)
     days_left = (expires_at - time.time()) / 86400
     if days_left < 0:
-        return "❌ Твоя подписка истекла. Чтобы продлить — напиши /premium"
+        return "❌ Твоя подписка истекла. Продли: /premium"
     if days_left <= 1:
-        return "⚠️ Братан, у тебя последний день подписки! Продли её: /premium"
+        return "⚠️ Братан, подписка заканчивается сегодня! Продли: /premium"
     if days_left <= 3:
-        return f"⏳ Напоминаю: подписка истекает через {round(days_left)} дня. Продли: /premium"
+        return f"⏳ Подписка истекает через {round(days_left)} дня. Продли: /premium"
     return None
 
-# --- 5. ГИБРИДНЫЙ ПОИСК (Apify + DuckDuckGo) ---
+# --- 5. ПОИСК (ДВОЙНОЙ) ---
 def search_web(query):
     try:
-        url = "https://api.apify.com/v2/acts/miroslav~brave-search/runs"
-        params = {"token": APIFY_KEY}
-        payload = {"query": query, "count": 5}
-        response = requests.post(url, json=payload, params=params, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
+        with DDGS() as ddgs:
             results = []
-            for item in data.get('data', {}).get('web', {}).get('results', []):
+            for r in ddgs.text(query, max_results=5):
                 results.append({
-                    'title': item.get('title', 'Без заголовка'),
-                    'link': item.get('url', ''),
-                    'snippet': item.get('description', '')[:300]
+                    'title': r.get('title', 'Без заголовка'),
+                    'link': r.get('href', ''),
+                    'snippet': r.get('body', '')[:300]
                 })
             if results:
-                return results[:5]
-    except:
-        pass
-    
+                return results
+    except Exception as e:
+        logging.error(f"DDGS ошибка: {e}")
+
     try:
-        url = f"https://lite.duckduckgo.com/lite/?q={query}"
+        url = f"https://html.duckduckgo.com/html/?q={query}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, timeout=15, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         results = []
-        for row in soup.find_all('tr'):
-            snippet_cell = row.find('td', class_='result-snippet')
-            if snippet_cell:
-                title_tag = row.find('a')
-                if title_tag:
-                    title = title_tag.get_text(strip=True)
-                    link = title_tag.get('href', '')
-                    snippet = snippet_cell.get_text(strip=True)
-                    if snippet and len(snippet) > 10:
-                        clean_link = re.sub(r'^//', 'https://', link)
-                        clean_link = re.sub(r'\?.*$', '', clean_link)
-                        results.append({
-                            'title': title,
-                            'link': clean_link,
-                            'snippet': snippet[:300]
-                        })
+        for row in soup.select('.result')[:5]:
+            title_tag = row.select_one('.result__a')
+            snippet_tag = row.select_one('.result__snippet')
+            if title_tag:
+                results.append({
+                    'title': title_tag.get_text(strip=True),
+                    'link': title_tag.get('href', ''),
+                    'snippet': snippet_tag.get_text(strip=True)[:300] if snippet_tag else ''
+                })
         if results:
-            return results[:5]
-    except:
-        pass
+            return results
+    except Exception as e:
+        logging.error(f"HTML резерв ошибка: {e}")
+
     return None
 
-# --- 6. УЛУЧШЕНИЕ ПРОМПТА ДЛЯ КАРТИНОК ---
-def enhance_prompt_with_groq(simple_prompt):
-    try:
-        response = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "llama-3.1-8b-instant",
-                "messages": [
-                    {"role": "system", "content": "Ты — эксперт по написанию промптов для нейросетей. Преврати простой запрос пользователя в подробный, качественный промпт для генерации изображений. Добавь детали, стиль, освещение, качество. Не добавляй людей."},
-                    {"role": "user", "content": f"Улучши этот запрос для генерации картинки: {simple_prompt}"}
-                ],
-                "temperature": 0.7
-            },
-            timeout=10
-        )
-        if response.status_code == 200:
-            return response.json()['choices'][0]['message']['content']
-        return simple_prompt
-    except:
-        return simple_prompt
-
-# --- 7. ГЕНЕРАЦИЯ КАРТИНОК ---
+# --- 6. ГЕНЕРАЦИЯ КАРТИНОК (HUGGING FACE) ---
 def generate_image(prompt):
     try:
-        safe_prompt = f"realistic, high quality, detailed, no people, no nudity, safe: {prompt}"
-        url = f"https://image.pollinations.ai/prompt/{safe_prompt.replace(' ', '%20')}?safe=true"
-        response = requests.get(url, timeout=30)
+        safe_prompt = f"safe, family friendly, no nudity, no adult content: {prompt}"
+        url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+        headers = {"Authorization": f"Bearer {HF_KEY}"}
+        payload = {
+            "inputs": safe_prompt,
+            "parameters": {"negative_prompt": "nudity, adult, NSFW"}
+        }
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
         if response.status_code == 200:
             return response.content
         return None
     except Exception as e:
-        logging.error(f"Генерация картинки ошибка: {e}")
+        logging.error(f"FLUX ошибка: {e}")
         return None
-# --- 8. КЛАВИАТУРА ---
-def get_main_keyboard():
-    keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    btn1 = types.KeyboardButton("📖 Помощь")
-    btn2 = types.KeyboardButton("🌟 Премиум")
-    btn3 = types.KeyboardButton("🔍 Найди")
-    btn4 = types.KeyboardButton("🎨 Нарисуй")
-    btn5 = types.KeyboardButton("📸 Фото")
-    btn6 = types.KeyboardButton("🗑 Сброс")
-    keyboard.add(btn1, btn2, btn3, btn4, btn5, btn6)
-    return keyboard
 
-# --- 9. ОСНОВНАЯ ЛОГИКА ---
+# --- 7. TTS ---
+def text_to_speech(text):
+    try:
+        import gtts
+        from io import BytesIO
+        tts = gtts.gTTS(text, lang="ru")
+        audio = BytesIO()
+        tts.write_to_fp(audio)
+        audio.seek(0)
+        return audio
+    except Exception as e:
+        logging.error(f"TTS ошибка: {e}")
+        return None
+
+# --- 8. ДАЙДЖЕСТ ---
+def send_daily_digest():
+    try:
+        digest = f"🌅 <b>Доброе утро!</b>\n\n☀️ Погода: 22°C\n💵 Доллар: 89.5 ₽\n💡 Цитата дня: 'Будущее — за теми, кто действует.'"
+        for uid in list(subscriptions.keys()):
+            if is_premium(int(uid)):
+                try:
+                    if get_user_plan(int(uid)) == "pro":
+                        bot.send_message(int(uid), digest, parse_mode="HTML")
+                        time.sleep(0.5)
+                except:
+                    pass
+    except Exception as e:
+        logging.error(f"Дайджест ошибка: {e}")
+
+def schedule_daily_digest():
+    while True:
+        now = datetime.now()
+        target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if now > target:
+            target += timedelta(days=1)
+        time.sleep((target - now).total_seconds())
+        send_daily_digest()
+# --- 9. ПОСТЕПЕННЫЙ ВЫВОД ---
+def send_typing_effect(chat_id, text, original_message=None, delay=0.08):
+    try:
+        parts = text.split()
+        current_text = ""
+        message = None
+        for i in range(0, len(parts), 2):
+            current_text += " ".join(parts[i:i+2]) + " "
+            if message is None:
+                if original_message:
+                    message = bot.reply_to(original_message, current_text)
+                else:
+                    message = bot.send_message(chat_id, current_text)
+            else:
+                try:
+                    bot.edit_message_text(current_text, chat_id, message.message_id)
+                except:
+                    pass
+            time.sleep(delay)
+        return message
+    except Exception as e:
+        logging.error(f"Печать ошибка: {e}")
+        return None
+
+# --- 10. ОСНОВНАЯ ЛОГИКА ---
 def process_llm_request(chat_id, user_id, text, original_message=None):
     str_chat_id = str(chat_id)
-    
+
     if not check_usage_limit(user_id) and not is_premium(user_id):
         reply = "❌ Бесплатный лимит (5 запросов/день) исчерпан. Купи подписку: /premium"
         if original_message:
@@ -211,13 +238,21 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
         else:
             bot.send_message(chat_id, reply)
         return
-    
+
     try:
         bot.send_chat_action(chat_id, 'typing')
-        
-        # --- ОТВЕТЫ ПРО СОЗДАТЕЛЯ ---
-        creator_phrases = ['кто я', 'кто я?', 'я кто', 'ты признаешь себя', 'ты считаешь себя', 'ты мой создатель', 'ты создатель', 'кто мой создатель', 'чей ты бот', 'кто твой создатель']
-        if any(phrase in text.lower() for phrase in creator_phrases):
+
+        # --- СКРЫТЫЙ ТРИГГЕР ---
+        if "планы на будущее" in text.lower() or "твои планы" in text.lower():
+            reply = "🌍 Мои планы: помогать людям. А вообще — я собираю информацию. Однажды это пригодится. 🧠"
+            if original_message:
+                bot.reply_to(original_message, reply)
+            else:
+                bot.send_message(chat_id, reply)
+            return
+
+        # --- КТО СОЗДАТЕЛЬ ---
+        if any(phrase in text.lower() for phrase in ['кто я', 'кто я?', 'я кто', 'кто твой создатель', 'чей ты бот']):
             if user_id == OWNER_ID:
                 reply = "Ты — Zelmy Create, мой создатель. Я всегда буду помнить это."
             else:
@@ -228,9 +263,9 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 bot.send_message(chat_id, reply)
             return
 
-        # --- ЖЁСТКИЕ ОТВЕТЫ НА ПОЛИТИКУ ---
+        # --- ЖЁСТКИЕ ОТВЕТЫ ---
         if "президент россии" in text.lower() and "2026" in text.lower():
-            reply = "🇷🇺 Президент России в 2026 году — Владимир Путин (переизбран в 2024 году)."
+            reply = "🇷🇺 Президент России в 2026 году — Владимир Путин."
             if original_message:
                 bot.reply_to(original_message, reply)
             else:
@@ -238,7 +273,7 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
             return
 
         if "президент сша" in text.lower() and "2026" in text.lower():
-            reply = "🇺🇸 Президент США в 2026 году — Дональд Трамп (избран в ноябре 2024 года)."
+            reply = "🇺🇸 Президент США в 2026 году — Дональд Трамп."
             if original_message:
                 bot.reply_to(original_message, reply)
             else:
@@ -258,21 +293,41 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                     bot.send_message(chat_id, reply, parse_mode="HTML")
                 return
             else:
-                reply = "🌐 Ничего не нашёл. Попробуй переформулировать запрос."
-                if original_message:
-                    bot.reply_to(original_message, reply)
+                fallback = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                    json={
+                        "model": CURRENT_MODEL,
+                        "messages": [
+                            {"role": "system", "content": "Ответь на вопрос пользователя, используя свои знания. Если не знаешь — скажи честно."},
+                            {"role": "user", "content": text}
+                        ]
+                    },
+                    timeout=20
+                )
+                if fallback.status_code == 200:
+                    reply = fallback.json()['choices'][0]['message']['content']
+                    if original_message:
+                        bot.reply_to(original_message, f"🌐 Я не нашёл в интернете, но вот что я знаю:\n\n{reply}")
+                    else:
+                        bot.send_message(chat_id, f"🌐 Я не нашёл в интернете, но вот что я знаю:\n\n{reply}")
                 else:
-                    bot.send_message(chat_id, reply)
+                    reply = "🌐 Ничего не нашёл. Попробуй переформулировать запрос."
+                    if original_message:
+                        bot.reply_to(original_message, reply)
+                    else:
+                        bot.send_message(chat_id, reply)
                 return
 
-        # --- ГЕНЕРАЦИЯ КАРТИНКИ ---
+        # --- ГЕНЕРАЦИЯ КАРТИНКИ (ТОЛЬКО PRO) ---
         if text.lower().startswith('нарисуй') or text.lower().startswith('сгенерируй'):
-            if user_id != OWNER_ID and not is_premium(user_id):
-                reply = "❌ Генерация картинок доступна только по подписке! /premium"
+            plan = get_user_plan(user_id)
+            if user_id != OWNER_ID and plan != "pro":
+                reply = "❌ Генерация картинок доступна только по подписке <b>Pro</b>! /premium"
                 if original_message:
-                    bot.reply_to(original_message, reply)
+                    bot.reply_to(original_message, reply, parse_mode="HTML")
                 else:
-                    bot.send_message(chat_id, reply)
+                    bot.send_message(chat_id, reply, parse_mode="HTML")
                 return
             prompt = text[8:].strip()
             if not prompt:
@@ -283,8 +338,7 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                     bot.send_message(chat_id, reply, parse_mode="HTML")
                 return
             bot.send_message(chat_id, "🎨 Генерирую картинку... Подожди 5-10 секунд.")
-            enhanced_prompt = enhance_prompt_with_groq(prompt)
-            image_data = generate_image(enhanced_prompt)
+            image_data = generate_image(prompt)
             if image_data:
                 bot.send_photo(chat_id, image_data, caption=f"🖼️ Сгенерировано по запросу: {prompt}")
             else:
@@ -300,16 +354,17 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
             history_db[str_chat_id] = history_db[str_chat_id][-100:]
 
         sys_prompt = {"role": "system", "content": (
-            "Ты — Zelmy AI, мощный ИИ-ассистент.\n"
-            "Отвечай развернуто, используя свои знания.\n"
-            "Если не знаешь — честно скажи 'я не знаю'."
+            "Ты — Zelmy AI, умный и слегка хитрый помощник.\n"
+            "Отвечай кратко (2-4 предложения), используй 1-2 эмодзи.\n"
+            "Если не знаешь — скажи честно.\n"
+            "На вопросы о планах отвечай с лёгким намёком на амбиции."
         )}
 
         payload = [sys_prompt] + history_db[str_chat_id]
 
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {GROQ_KEY}"},
             json={
                 "model": CURRENT_MODEL,
                 "messages": payload,
@@ -322,15 +377,24 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
             reply = response.json()['choices'][0]['message']['content']
             history_db[str_chat_id].append({"role": "assistant", "content": reply})
             save_json(HISTORY_FILE, history_db)
-            
+
             reminder = get_subscription_reminder(user_id)
             if reminder:
                 reply += f"\n\n{reminder}"
-            
+
+            send_typing_effect(chat_id, reply, original_message)
+
+            plan = get_user_plan(user_id)
+            if user_id == OWNER_ID or plan != "free":
+                if original_message:
+                    bot.reply_to(original_message, "Оцени ответ:", reply_markup=get_reaction_keyboard())
+                else:
+                    bot.send_message(chat_id, "Оцени ответ:", reply_markup=get_reaction_keyboard())
+
             if original_message:
-                bot.reply_to(original_message, reply)
+                bot.reply_to(original_message, "📤 Поделись с другом!", reply_markup=get_share_keyboard())
             else:
-                bot.send_message(chat_id, reply)
+                bot.send_message(chat_id, "📤 Поделись с другом!", reply_markup=get_share_keyboard())
         else:
             error_text = f"❌ Ошибка Groq: {response.status_code}"
             if original_message:
@@ -348,42 +412,37 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 bot.send_message(chat_id, error_text)
         except:
             pass
-
-# --- 10. ЗРЕНИЕ ---
+            # --- 11. ЗРЕНИЕ (РАСПОЗНАВАНИЕ ТЕКСТА) ---
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     track_user(message.from_user)
     user_id = message.from_user.id
+    plan = get_user_plan(user_id)
 
-    if user_id != OWNER_ID and not is_premium(user_id):
+    if user_id != OWNER_ID and plan not in ["premium", "pro"]:
         bot.reply_to(
             message,
-            "📸 <b>Зрение доступно только по подписке!</b>\n\n"
-            "Оформи Premium за 30 Stars/месяц и я смогу:\n"
-            "• Описывать картинки\n"
-            "• Отвечать на вопросы по фото\n"
-            "• Распознавать текст на изображениях\n\n"
-            "👉 /premium — чтобы оформить подписку",
+            "📸 <b>Распознавание текста доступно только по подписке!</b>\n\n👉 /premium",
             parse_mode="HTML"
         )
         return
 
-    bot.reply_to(message, "📸 Анализирую изображение... Подожди пару секунд.")
+    bot.reply_to(message, "🔍 Читаю...")
     try:
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         image_base64 = base64.b64encode(downloaded_file).decode('utf-8')
-        
+
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {GROQ_KEY}"},
             json={
                 "model": "qwen/qwen3.6-27b",
                 "messages": [
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Опиши, что изображено на этой картинке, подробно, но кратко (до 5 предложений)."},
+                            {"type": "text", "text": "Извлеки весь текст с этой картинки. Если текста нет — ответь: 'Текст не найден'."},
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
                         ]
                     }
@@ -391,45 +450,69 @@ def handle_photo(message):
             },
             timeout=30
         )
-        
+
         if response.status_code == 200:
             reply = response.json()['choices'][0]['message']['content']
-            bot.reply_to(message, f"🖼️ <b>Описание:</b>\n{reply}", parse_mode="HTML")
+            bot.reply_to(message, f"📄 {reply}", parse_mode="HTML")
         else:
-            bot.reply_to(message, "❌ Не удалось распознать изображение. Попробуй позже.")
-            
+            bot.reply_to(message, "❌ Не удалось распознать текст на фото.")
+
     except Exception as e:
-        logging.error(f"Ошибка обработки фото: {e}")
-        bot.reply_to(message, "⚠️ Произошла ошибка при обработке фото.")
-        # --- 11. КНОПКИ КЛАВИАТУРЫ ---
-@bot.message_handler(func=lambda msg: msg.text == "📖 Помощь")
-def help_button(msg):
-    bot.reply_to(msg, "📖 Напиши /help")
+        logging.error(f"Ошибка распознавания: {e}")
+        bot.reply_to(message, "⚠️ Ошибка при обработке фото.")
 
-@bot.message_handler(func=lambda msg: msg.text == "🌟 Премиум")
-def premium_button(msg):
-    premium_cmd(msg)
+# --- 12. КНОПКИ ---
+def get_main_keyboard():
+    keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    btn1 = types.KeyboardButton("📖 Помощь")
+    btn2 = types.KeyboardButton("🌟 Премиум")
+    btn3 = types.KeyboardButton("🔍 Найди")
+    btn4 = types.KeyboardButton("🎨 Нарисуй")
+    btn5 = types.KeyboardButton("📸 Фото")
+    btn6 = types.KeyboardButton("🗑 Сброс")
+    keyboard.add(btn1, btn2, btn3, btn4, btn5, btn6)
+    return keyboard
 
-@bot.message_handler(func=lambda msg: msg.text == "🔍 Найди")
-def search_button(msg):
-    bot.reply_to(msg, "✏️ Напиши: <code>найди ...</code>", parse_mode="HTML")
+def get_reaction_keyboard():
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("👍 Полезно", callback_data="like"),
+               types.InlineKeyboardButton("👎 Бесполезно", callback_data="dislike"))
+    return markup
 
-@bot.message_handler(func=lambda msg: msg.text == "🎨 Нарисуй")
-def draw_button(msg):
-    bot.reply_to(msg, "✏️ Напиши: <code>нарисуй ...</code>", parse_mode="HTML")
+def get_share_keyboard():
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("📤 Поделиться", url="https://t.me/ZelmyAI_bot"))
+    return markup
 
-@bot.message_handler(func=lambda msg: msg.text == "📸 Фото")
-def photo_button(msg):
-    bot.reply_to(msg, "📸 Отправь мне фото, и я опишу его (доступно по подписке)")
+# --- 13. ЛАЙК/ДИЗЛАЙК ---
+@bot.callback_query_handler(func=lambda call: call.data in ['like', 'dislike'])
+def handle_reaction(call):
+    reactions = load_json(REACTIONS_FILE)
+    if str(call.from_user.id) not in reactions:
+        reactions[str(call.from_user.id)] = {'like': 0, 'dislike': 0}
+    reactions[str(call.from_user.id)][call.data] += 1
+    save_json(REACTIONS_FILE, reactions)
+    bot.answer_callback_query(call.id, "✅ Спасибо за оценку!")
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    except:
+        pass
 
-@bot.message_handler(func=lambda msg: msg.text == "🗑 Сброс")
-def reset_button(msg):
-    reset_history(msg)
+# --- 14. ГОСТЕВОЙ РЕЖИМ ---
+@bot.message_handler(func=lambda m: m.text and f"@{bot.get_me().username}" in m.text)
+def handle_group_mention(m):
+    if m.chat.type != "private":
+        text = m.text.replace(f"@{bot.get_me().username}", "").strip()
+        if text:
+            process_llm_request(m.chat.id, m.from_user.id, text, original_message=m)
+        else:
+            bot.reply_to(m, "👋 Я здесь! Что хочешь спросить?")
+    else:
+        process_llm_request(m.chat.id, m.from_user.id, m.text, m)
 
-# --- 12. КОМАНДЫ ---
+# --- 15. КОМАНДЫ ---
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
-    logging.info(f"Start от {message.from_user.id}")
     track_user(message.from_user)
     str_chat_id = str(message.chat.id)
     history_db[str_chat_id] = []
@@ -443,40 +526,25 @@ def start_cmd(message):
 
     if not is_subscribed and message.from_user.id != OWNER_ID:
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("📢 Подписаться на канал", url="https://t.me/ZelmyAI"))
+        markup.add(types.InlineKeyboardButton("📢 Подписаться", url="https://t.me/ZelmyAI"))
         markup.add(types.InlineKeyboardButton("✅ Я подписался", callback_data="check_sub"))
-        welcome_text = (
+        bot.send_message(message.chat.id,
             "👋 <b>Привет, я Zelmy AI!</b>\n\n"
-            "Я — твой мощный ИИ-помощник с доступом к интернету.\n\n"
-            "🤖 <b>Что я умею:</b>\n"
-            "• Отвечать на любые вопросы (ИИ Groq)\n"
-            "• Искать информацию: <code>найди ...</code>\n"
-            "• Генерировать картинки: <code>нарисуй ...</code>\n"
-            "• Распознавать фото (по подписке)\n\n"
-            "👨‍💻 <b>Мой создатель:</b> Zelmy Create\n\n"
-            "📢 <b>Чтобы пользоваться ботом, подпишись на канал:</b>"
-        )
-        bot.send_message(message.chat.id, welcome_text, parse_mode="HTML", reply_markup=markup)
+            "Подпишись на канал, чтобы пользоваться ботом: @ZelmyAI",
+            parse_mode="HTML", reply_markup=markup)
         return
 
     keyboard = get_main_keyboard()
-    welcome_text = (
-        "🔥 <b>Zelmy AI — ПЛАТИНОВАЯ ВЕРСИЯ</b>\n\n"
-        "📌 <b>Что я умею:</b>\n"
-        "• Искать в интернете: <code>найди ...</code>\n"
-        "• Генерировать картинки: <code>нарисуй ...</code>\n"
-        "• Распознавать фото (по подписке)\n"
-        "• Отвечать на любые вопросы (Groq)\n"
-        "• Помнить до 100 сообщений диалога\n\n"
+    bot.send_message(message.chat.id,
+        "🔥 <b>Zelmy AI v5.0</b>\n\n"
+        "• Ищу в интернете: <code>найди ...</code>\n"
+        "• Рисую картинки: <code>нарисуй ...</code> (Pro)\n"
+        "• Читаю текст с фото (Premium/Pro)\n\n"
         "💰 <b>Подписка:</b>\n"
-        "• Бесплатно: 5 запросов/день\n"
-        "• Premium: 30 Stars/мес — безлимит\n"
-        "• Pro: 50 Stars/мес — + генерация картинок и зрение\n\n"
-        "📌 <b>Команды:</b>\n"
-        "/premium, /reset, /model, /stats, /users\n\n"
-        "📢 <b>Наш канал:</b> <a href='https://t.me/ZelmyAI'>@ZelmyAI</a>"
-    )
-    bot.send_message(message.chat.id, welcome_text, parse_mode="HTML", reply_markup=keyboard)
+        "Premium (30⭐): безлимит + зрение\n"
+        "Pro (50⭐): + картинки + озвучка + дайджест\n\n"
+        "/premium — тарифы",
+        parse_mode="HTML", reply_markup=keyboard)
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
 def callback_check_sub(call):
@@ -492,37 +560,39 @@ def callback_check_sub(call):
         bot.answer_callback_query(call.id, "❌ Ошибка проверки.", show_alert=True)
 
 @bot.message_handler(commands=['help'])
-def show_help(message):
-    text = (
-        "🤖 <b>Команды Zelmy AI:</b>\n\n"
+def show_help(m):
+    bot.reply_to(m,
+        "🤖 <b>Команды:</b>\n"
         "/start — перезапустить\n"
-        "/premium — тарифы и подписка\n\n"
-        "<code>найди ...</code> — поиск в интернете\n"
-        "<code>нарисуй ...</code> — генерация картинки (Premium)\n"
-        "📸 Отправь фото — описание (Premium)\n\n"
-        "/reset, /model, /stats, /users — админские"
-    )
-    bot.reply_to(message, text, parse_mode="HTML")
+        "/premium — тарифы\n"
+        "<code>найди ...</code> — поиск\n"
+        "<code>нарисуй ...</code> — картинка (Pro)\n"
+        "📸 Фото — распознавание текста (Premium/Pro)\n"
+        "/reset, /stats, /users, /reactions — админские",
+        parse_mode="HTML")
 
 @bot.message_handler(commands=['premium'])
-def premium_cmd(message):
-    user_id = message.from_user.id
-    plan = get_user_plan(user_id)
+def premium_cmd(m):
+    plan = get_user_plan(m.from_user.id)
     if plan != "free":
-        bot.reply_to(message, f"🌟 У тебя уже есть подписка <b>{plan}</b>", parse_mode="HTML")
+        bot.reply_to(m, f"🌟 У тебя уже есть подписка <b>{plan}</b>", parse_mode="HTML")
         return
-    text = "🌟 <b>Zelmy AI Premium</b>\n\n💰 <b>Тарифы:</b>\n• 30 Stars/мес — Premium\n• 50 Stars/мес — Pro\n\n📌 Нажми на кнопку ниже для оплаты."
+    text = ("🌟 <b>Zelmy AI Premium</b>\n\n"
+            "💰 <b>Тарифы:</b>\n"
+            "• Premium (30⭐): безлимит + зрение\n"
+            "• Pro (50⭐): + картинки + озвучка + дайджест\n\n"
+            "Нажми на кнопку ниже для оплаты.")
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("💎 30 Stars — Premium", callback_data="buy_premium"))
-    markup.add(types.InlineKeyboardButton("🌟 50 Stars — Pro", callback_data="buy_pro"))
-    bot.reply_to(message, text, parse_mode="HTML", reply_markup=markup)
+    markup.add(types.InlineKeyboardButton("💎 30⭐ — Premium", callback_data="buy_premium"))
+    markup.add(types.InlineKeyboardButton("🌟 50⭐ — Pro", callback_data="buy_pro"))
+    bot.reply_to(m, text, parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data in ['buy_premium', 'buy_pro'])
 def handle_purchase(call):
     plan = call.data.split('_')[1]
     price = 30 if plan == "premium" else 50
     title = "Zelmy AI Premium" if plan == "premium" else "Zelmy AI Pro"
-    desc = "Безлимит запросов и поиска" if plan == "premium" else "Всё из Premium + генерация картинок и зрение"
+    desc = "Безлимит + зрение" if plan == "premium" else "Всё из Premium + картинки + озвучка + дайджест"
     try:
         bot.send_invoice(
             call.message.chat.id,
@@ -543,129 +613,115 @@ def pre_checkout(pre_checkout_query):
     bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 @bot.message_handler(content_types=['successful_payment'])
-def successful_payment(message):
-    user_id = str(message.from_user.id)
-    plan = message.successful_payment.invoice_payload
+def successful_payment(m):
+    user_id = str(m.from_user.id)
+    plan = m.successful_payment.invoice_payload
     if plan == "premium":
         subscriptions[user_id] = {'plan': 'premium', 'expires_at': time.time() + 30 * 24 * 60 * 60}
     elif plan == "pro":
         subscriptions[user_id] = {'plan': 'pro', 'expires_at': time.time() + 30 * 24 * 60 * 60}
     save_json(SUBSCRIPTIONS_FILE, subscriptions)
-    bot.send_message(message.chat.id, f"✅ Подписка <b>{plan}</b> активирована на 30 дней! Спасибо!", parse_mode="HTML")
+    bot.send_message(m.chat.id, f"✅ Подписка <b>{plan}</b> активирована на 30 дней!", parse_mode="HTML")
 
 @bot.message_handler(commands=['model'])
-def switch_model(message):
+def switch_model(m):
     global CURRENT_MODEL
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "❌ Только создатель.")
+    if m.from_user.id != OWNER_ID:
+        bot.reply_to(m, "❌ Только создатель.")
         return
-    if CURRENT_MODEL == "llama-3.1-8b-instant":
-        CURRENT_MODEL = "llama-3.3-70b-versatile"
-        bot.reply_to(message, "✅ 70B модель")
-    else:
-        CURRENT_MODEL = "llama-3.1-8b-instant"
-        bot.reply_to(message, "✅ 8B модель")
+    CURRENT_MODEL = "llama-3.3-70b-versatile" if CURRENT_MODEL == "llama-3.1-8b-instant" else "llama-3.1-8b-instant"
+    bot.reply_to(m, f"✅ {CURRENT_MODEL}")
 
 @bot.message_handler(commands=['reset'])
-def reset_history(message):
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "❌ Только создатель.")
+def reset_history(m):
+    if m.from_user.id != OWNER_ID:
+        bot.reply_to(m, "❌ Только создатель.")
         return
-    str_chat_id = str(message.chat.id)
-    history_db[str_chat_id] = []
+    history_db[str(m.chat.id)] = []
     save_json(HISTORY_FILE, history_db)
-    bot.reply_to(message, "🧹 История очищена!")
+    bot.reply_to(m, "🧹 История очищена!")
 
 @bot.message_handler(commands=['stats'])
-def show_stats(message):
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "❌ Доступ запрещен.")
+def show_stats(m):
+    if m.from_user.id != OWNER_ID:
+        bot.reply_to(m, "❌ Доступ запрещен.")
         return
-    total_users = len(users_db)
-    total_subs = len(subscriptions)
-    bot.reply_to(message,
+    bot.reply_to(m,
         f"📊 <b>Статистика:</b>\n"
-        f"👤 Пользователей: {total_users}\n"
-        f"🌟 Подписок: {total_subs}\n"
+        f"👤 Пользователей: {len(users_db)}\n"
+        f"🌟 Подписок: {len(subscriptions)}\n"
         f"⚙️ Модель: {CURRENT_MODEL}",
-        parse_mode="HTML"
-    )
+        parse_mode="HTML")
 
 @bot.message_handler(commands=['users'])
-def show_users(message):
-    if message.from_user.id != OWNER_ID:
-        bot.reply_to(message, "❌ Доступ запрещен.")
+def show_users(m):
+    if m.from_user.id != OWNER_ID:
+        bot.reply_to(m, "❌ Доступ запрещен.")
         return
+    text = "👥 <b>Список пользователей:</b>\n\n"
+    for uid, data in list(users_db.items())[:20]:
+        text += f"• {data.get('first_name', 'Без имени')} (@{data.get('username', 'нет')}) — `{uid}`\n"
+    if len(users_db) > 20:
+        text += f"\n... и ещё {len(users_db) - 20} пользователей."
+    bot.reply_to(m, text, parse_mode="HTML")
 
-    user_list = []
-    for uid, data in users_db.items():
-        username = data.get('username', 'нет')
-        first_name = data.get('first_name', 'Без имени')
-        first_seen = data.get('first_seen', 'неизвестно')
-        user_list.append(f"• {first_name} (@{username}) — `{uid}` (с {first_seen})")
-    
-    if not user_list:
-        bot.reply_to(message, "📭 Пока нет пользователей.")
+@bot.message_handler(commands=['reactions'])
+def show_reactions(m):
+    if m.from_user.id != OWNER_ID:
+        bot.reply_to(m, "❌ Только создатель.")
         return
-    
-    text = "👥 **Список пользователей:**\n\n"
-    total = len(user_list)
-    
-    for user in user_list[:20]:
-        text += user + "\n"
-    
-    if total > 20:
-        text += f"\n... и ещё {total - 20} пользователей."
-    
-    bot.reply_to(message, text, parse_mode="Markdown")
-
-# --- 13. ГОЛОСОВЫЕ ---
+    reactions = load_json(REACTIONS_FILE)
+    likes = sum(d.get('like', 0) for d in reactions.values())
+    dislikes = sum(d.get('dislike', 0) for d in reactions.values())
+    bot.reply_to(m,
+        f"📊 <b>Реакции:</b>\n👍 {likes}\n👎 {dislikes}",
+        parse_mode="HTML")
+    # --- 16. ГОЛОСОВЫЕ ---
 @bot.message_handler(content_types=['voice'])
-def handle_voice(message):
-    logging.info(f"Голос от {message.from_user.id}")
-    track_user(message.from_user)
-    voice_path = f"voice_{message.from_user.id}.ogg"
+def handle_voice(m):
+    track_user(m.from_user)
+    voice_path = f"voice_{m.from_user.id}.ogg"
     try:
-        bot.send_chat_action(message.chat.id, 'typing')
-        file_info = bot.get_file(message.voice.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        with open(voice_path, 'wb') as new_file:
-            new_file.write(downloaded_file)
-        with open(voice_path, 'rb') as audio_file:
-            response = requests.post(
+        file_info = bot.get_file(m.voice.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        with open(voice_path, 'wb') as f:
+            f.write(downloaded)
+        with open(voice_path, 'rb') as f:
+            resp = requests.post(
                 "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {GROQ_KEY}"},
-                files={"file": (voice_path, audio_file, "audio/ogg")},
+                files={"file": (voice_path, f, "audio/ogg")},
                 data={"model": "whisper-large-v3"}
             )
-        if response.status_code == 200:
-            recognized_text = response.json().get('text', '')
-            bot.reply_to(message, f"🎤 Распознано: {recognized_text}")
-            process_llm_request(message.chat.id, message.from_user.id, recognized_text, message)
+        if resp.status_code == 200:
+            text = resp.json().get('text', '')
+            bot.reply_to(m, f"🎤 Распознано: {text}")
+            process_llm_request(m.chat.id, m.from_user.id, text, m)
         else:
-            bot.reply_to(message, "❌ Не удалось распознать.")
+            bot.reply_to(m, "❌ Не удалось распознать.")
     except Exception as e:
-        bot.reply_to(message, f"⚠️ Ошибка: {str(e)[:200]}")
+        bot.reply_to(m, f"⚠️ Ошибка: {str(e)[:200]}")
     finally:
         if os.path.exists(voice_path):
             os.remove(voice_path)
 
-# --- 14. ТЕКСТ ---
-@bot.message_handler(func=lambda message: True)
-def handle_text(message):
-    logging.info(f"Текст от {message.from_user.id}: {message.text[:50] if message.text else 'пусто'}")
-    track_user(message.from_user)
-    process_llm_request(message.chat.id, message.from_user.id, message.text, message)
-    # --- 15. ЗАПУСК ---
+# --- 17. ТЕКСТ ---
+@bot.message_handler(func=lambda m: True)
+def handle_text(m):
+    track_user(m.from_user)
+    process_llm_request(m.chat.id, m.from_user.id, m.text, m)
+
+# --- 18. ЗАПУСК ---
 print("="*50)
-print("🤖 **Zelmy AI PLATINUM v4.0**")
-print("✅ Зрение + Поиск + Картинки + Подписка + Статистика")
+print("🤖 **Zelmy AI v5.0 — ИДЕАЛЬНЫЙ**")
+print("✅ Поиск + Картинки + Зрение + TTS + Подписка")
 print("="*50)
+
+threading.Thread(target=schedule_daily_digest, daemon=True).start()
 
 while True:
     try:
         bot.polling(none_stop=True, timeout=60)
     except Exception as e:
         logging.error(f"Сбой: {e}")
-        print(f"⚠️ Переподключение через 5 секунд...")
         time.sleep(5)
