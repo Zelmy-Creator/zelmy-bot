@@ -1,7 +1,7 @@
 pyTelegramBotAPI
 requests
 beautifulsoup4
-duckduckgo-search
+ddgs
 pytesseract
 Pillow
 gTTS
