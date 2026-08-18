@@ -26,28 +26,34 @@ def _executescript(sql):
         _conn.executescript(sql)
         _conn.commit()
 
-def init_db():
+
+            
+
+def _migrate_from_json_if_needed():
+    """Одноразовая миграция: если рядом лежат старые *.json - переносим def init_db():
     _executescript("""
-CREATE TABLE IF NOT EXISTS users (
+        CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY,
             username TEXT,
             first_name TEXT,
-            first_seen TEXT,
             banned INTEGER DEFAULT 0,
             referred_by INTEGER,
             referral_count INTEGER DEFAULT 0,
             persona TEXT DEFAULT 'default'
         );
+
         CREATE TABLE IF NOT EXISTS subscriptions (
             user_id INTEGER PRIMARY KEY,
             plan TEXT,
             expires_at REAL
         );
+
         CREATE TABLE IF NOT EXISTS usage_daily (
             user_id INTEGER PRIMARY KEY,
             date TEXT,
             count INTEGER DEFAULT 0
         );
+
         CREATE TABLE IF NOT EXISTS chat_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id INTEGER,
@@ -55,7 +61,9 @@ CREATE TABLE IF NOT EXISTS users (
             content TEXT,
             ts REAL
         );
+
         CREATE INDEX IF NOT EXISTS idx_history_chat ON chat_history(chat_id, ts);
+
         CREATE TABLE IF NOT EXISTS promocodes (
             code TEXT PRIMARY KEY,
             plan TEXT,
@@ -63,41 +71,43 @@ CREATE TABLE IF NOT EXISTS users (
             max_uses INTEGER,
             created_by INTEGER
         );
+
         CREATE TABLE IF NOT EXISTS promo_uses (
             code TEXT,
             user_id INTEGER,
             PRIMARY KEY (code, user_id)
         );
+
         CREATE TABLE IF NOT EXISTS stats_events (
             name TEXT PRIMARY KEY,
             count INTEGER DEFAULT 0
         );
+
         CREATE TABLE IF NOT EXISTS stats_daily_active (
             date TEXT,
             user_id INTEGER,
             PRIMARY KEY (date, user_id)
         );
+
         CREATE TABLE IF NOT EXISTS stats_errors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             time TEXT,
             context TEXT,
             error TEXT
         );
+
         CREATE TABLE IF NOT EXISTS campaign (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             plan TEXT,
             days INTEGER,
             slots_left INTEGER
         );
+
         CREATE TABLE IF NOT EXISTS campaign_granted (
             user_id INTEGER PRIMARY KEY
         );
     """)
-    _migrate_from_json_if_needed()
-
-def _migrate_from_json_if_needed():
-    """Одноразовая миграция: если рядом лежат старые *.json - переносим их в SQLite,
-    затем переименовываем в *.json.migrated, чтобы не мигрировать повторно."""
+ 
     def load(fname):
         if not os.path.exists(fname):
             return None
