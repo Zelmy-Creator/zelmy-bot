@@ -28,7 +28,7 @@ def _executescript(sql):
 
 def init_db():
     _executescript("""
-        CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY,
             username TEXT,
             first_name TEXT,
