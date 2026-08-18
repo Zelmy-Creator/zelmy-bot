@@ -471,3 +471,4 @@ def grant_campaign_reward_if_eligible(user_id):
         stop_campaign()
 
     return plan, days
+    init_db()
