@@ -18,24 +18,22 @@ import config
 import database as db
 from cache import search_cache
 
-
-# ---------- ФИЛЬТР ЭКСТРЕМИЗМА ----------
+# -- ФИЛЬТР ЭКСТРЕМИЗМА --
 EXTREMISM_PATTERNS = [
     r'\bкак\s+(сделать|изготовить|собрать)\s+(бомб|взрывчат|сву)',
-    r'\bкак\s+(вступить|попасть|присоединиться)\s+\b\s+(игил|аль-?каид|запрещенн)',
-    r'\bпризыв(ы)?\s+\b\s+(терроризм|насильственн|свержени)',
+    r'\bкак\s+(вступить|попасть|присоединиться)\s+в\s+(игил|аль-?каид|запрещенн)',
+    r'\bпризыв(ы)?\s+к\s+(терроризм|насильственн|свержени)',
     r'\bоправдани[ея]\s+(терроризм|геноцид)',
     r'\b(вербовк|вербуй|вербую)\b.*(терро|экстрем)',
 ]
 EXTREMISM_RE = [re.compile(p, re.IGNORECASE) for p in EXTREMISM_PATTERNS]
-EXTREMISM_REFUSAL = "🙅 Не могу помочь с этим запросом – тема нарушает правила бота."
+EXTREMISM_REFUSAL = "⚠️ Не могу помочь с этим запросом – тема нарушает правила бота."
 
 def is_extremism_related(text):
     lowered = text.lower()
     return any(p.search(lowered) for p in EXTREMISM_RE)
 
-
-# ---------- ПОИСК (с кэшем) ----------
+# --- ПОИСК (с кэшем) ---
 def _dedupe_by_domain(results, limit):
     seen = set()
     out = []
@@ -65,7 +63,7 @@ def search_web(query, max_results=6):
                     snippet = (r.get('body', '') or '').strip()
                     results.append({
                         'title': (r.get('title') or 'Без заголовка').strip(),
-                        'link': r.get('link', '').strip(),
+                        'link': r.get('href', '').strip(),
                         'snippet': snippet[:300]
                     })
                 results = _dedupe_by_domain(results, max_results)
@@ -73,48 +71,43 @@ def search_web(query, max_results=6):
                     search_cache.set(query.lower().strip(), results, config.SEARCH_CACHE_TTL)
                     return results
         except Exception as e:
-            logging.error(f"Поиск ошибка: {e}")
-            db.track_error("search_web", e)
-            return None
+            logging.error(f"DuckDuckGo поиск ошибка: {e}")
 
-    # Fallback: поиск через HTML-парсинг (duckduckgo html)
+    # Fallback: поиск через html-парсинг
     try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
         url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
-        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            results = []
-            for row in soup.select('.result'):
-                title_tag = row.select_one('.result__a')
-                snippet_tag = row.select_one('.result__snippet')
-                if title_tag:
-                    results.append({
-                        'title': title_tag.get_text(strip=True),
-                        'link': title_tag.get('href', ''),
-                        'snippet': snippet_tag.get_text(strip=True)[:300] if snippet_tag else ''
-                    })
-            results = _dedupe_by_domain(results, max_results)
-            if results:
-                search_cache.set(query.lower().strip(), results, config.SEARCH_CACHE_TTL)
-                return results
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        results = []
+        for row in soup.select('.result'):
+            title_tag = row.select_one('.result__a')
+            snippet_tag = row.select_one('.result__snippet')
+            if title_tag:
+                results.append({
+                    'title': title_tag.get_text(strip=True),
+                    'link': title_tag.get('href', ''),
+                    'snippet': snippet_tag.get_text(strip=True)[:300] if snippet_tag else ''
+                })
+        results = _dedupe_by_domain(results, max_results)
+        if results:
+            search_cache.set(query.lower().strip(), results, config.SEARCH_CACHE_TTL)
+            return results
     except Exception as e:
         logging.error(f"Fallback поиск ошибка: {e}")
         db.track_error("search_web", e)
-        return None
 
     return None
 
-
-# ---------- КАРТИНКИ (временно отключено — см. handlers.py) ----------
+# --- КАРТИНКИ (временно отключено — см. handlers.py) ---
 def generate_image(prompt, retries=2):
-    # Функция временно отключена
     return None
-
-
-# ---------- TTS ----------
+# --- TTS ---
 def text_to_speech(text):
     try:
-        clean = re.sub(r'[*_#\[\]\(\)]', '', text)[:800]
+        clean = re.sub(r'[*_#\[\]()]', '', text)[:800]
         tts = gTTS(text=clean, lang='ru')
         audio = io.BytesIO()
         tts.write_to_fp(audio)
@@ -125,8 +118,7 @@ def text_to_speech(text):
         logging.error(f"TTS ошибка: {e}")
         return None
 
-
-# ---------- ТРАНСКРИБАЦИЯ ГОЛОСА ----------
+# --- ТРАНСКРИБАЦИЯ ГОЛОСА ---
 def transcribe_voice(file_bytes, filename="voice.ogg"):
     try:
         response = requests.post(
@@ -143,8 +135,7 @@ def transcribe_voice(file_bytes, filename="voice.ogg"):
         logging.error(f"Ошибка транскрибации: {e}")
     return None
 
-
-# ---------- OCR ----------
+# --- OCR ---
 def extract_text_from_image(image_bytes):
     try:
         image = Image.open(io.BytesIO(image_bytes))
@@ -153,9 +144,7 @@ def extract_text_from_image(image_bytes):
     except Exception as e:
         logging.error(f"OCR ошибка: {e}")
         return "Ошибка распознавания"
-
-
-# ---------- ПОТОКОВАЯ ГЕНЕРАЦИЯ ОТВЕТА (Groq) ----------
+        # --- ПОТОКОВАЯ ГЕНЕРАЦИЯ ОТВЕТА (Groq) ---
 def stream_groq_completion(messages, on_delta, max_tokens=2000, temperature=0.5):
     """Стримит ответ от Groq, вызывая on_delta(full_text_so_far) на каждый новый кусок.
     Возвращает полный текст либо None при ошибке."""
@@ -204,9 +193,7 @@ def stream_groq_completion(messages, on_delta, max_tokens=2000, temperature=0.5)
         logging.error(f"Ошибка стриминга Groq: {e}")
         db.track_error("stream_groq_completion", e)
         return None
-
     return full_text if full_text.strip() else None
-
 
 def groq_completion_simple(messages, max_tokens=1500, timeout=30):
     """Обычный (не потоковый) запрос – используется для короткого fallback-ответа поиска."""
