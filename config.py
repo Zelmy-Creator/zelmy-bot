@@ -8,7 +8,7 @@ CHANNEL_USERNAME = "@ZelmyAI"
 
 DB_PATH = os.environ.get("DB_PATH", "zelmy.db")
 
-CURRENT_MODEL = "llama-3.1-70b-versatile"
+CURRENT_MODEL = "mixtral-8x7b-32768"
 
 HISTORY_RETENTION_DAYS = 30
 HISTORY_LIMIT = 300
