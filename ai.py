@@ -1,15 +1,10 @@
-import io
 import re
 import json
 import time
-import random
 import logging
 import urllib.parse
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image
-import pytesseract
-from gtts import gTTS
 try:
     from ddgs import DDGS
 except ImportError:
@@ -18,22 +13,22 @@ import config
 import database as db
 from cache import search_cache
 
-# -- ФИЛЬТР ЭКСТРЕМИЗМА --
+# ---------- ФИЛЬТР ЭКСТРЕМИЗМА ----------
 EXTREMISM_PATTERNS = [
-    r'\bкак\s+(сделать|изготовить|собрать)\s+(бомб|взрывчат|сву)',
-    r'\bкак\s+(вступить|попасть|присоединиться)\s+в\s+(игил|аль-?каид|запрещенн)',
+    r'\bкак\s+(сделать|изготовить|собрать)\s+(бомб|взрывчат|взрывчатк)',
+    r'\bкак\s+(вступить|попасть|присоединиться)\s+к\s+(игил|аль-?каид|запрещенн)',
     r'\bпризыв(ы)?\s+к\s+(терроризм|насильственн|свержени)',
     r'\bоправдани[ея]\s+(терроризм|геноцид)',
     r'\b(вербовк|вербуй|вербую)\b.*(терро|экстрем)',
 ]
 EXTREMISM_RE = [re.compile(p, re.IGNORECASE) for p in EXTREMISM_PATTERNS]
-EXTREMISM_REFUSAL = "⚠️ Не могу помочь с этим запросом – тема нарушает правила бота."
+EXTREMISM_REFUSAL = "❌ Не могу помочь с этим запросом – тема нарушает правила бота."
 
 def is_extremism_related(text):
     lowered = text.lower()
     return any(p.search(lowered) for p in EXTREMISM_RE)
 
-# --- ПОИСК (с кэшем) ---
+# ---------- ПОИСК (с кэшем) ----------
 def _dedupe_by_domain(results, limit):
     seen = set()
     out = []
@@ -63,7 +58,7 @@ def search_web(query, max_results=6):
                     snippet = (r.get('body', '') or '').strip()
                     results.append({
                         'title': (r.get('title') or 'Без заголовка').strip(),
-                        'link': r.get('href', '').strip(),
+                        'link': r.get('href', ''),
                         'snippet': snippet[:300]
                     })
                 results = _dedupe_by_domain(results, max_results)
@@ -71,24 +66,26 @@ def search_web(query, max_results=6):
                     search_cache.set(query.lower().strip(), results, config.SEARCH_CACHE_TTL)
                     return results
         except Exception as e:
-            logging.error(f"DuckDuckGo поиск ошибка: {e}")
+            logging.error(f"DuckDuckGo ошибка: {e}")
+            db.track_error("search_web", e)
+            continue
 
-    # Fallback: поиск через html-парсинг
+    # Fallback: HTML-парсинг (если DDGS не работает)
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        resp = requests.get(f"https://yandex.ru/search/?text={urllib.parse.quote(query)}", headers=headers, timeout=10)
+        soup = BeautifulSoup(resp.text, 'html.parser')
         results = []
-        for row in soup.select('.result'):
-            title_tag = row.select_one('.result__a')
-            snippet_tag = row.select_one('.result__snippet')
+        for row in soup.select('.serp-item'):
+            title_tag = row.select_one('.organic__title')
+            snippet_tag = row.select_one('.organic__text')
             if title_tag:
+                link = title_tag.get('href', '')
+                if link.startswith('/'):
+                    link = 'https://yandex.ru' + link
                 results.append({
                     'title': title_tag.get_text(strip=True),
-                    'link': title_tag.get('href', ''),
+                    'link': link,
                     'snippet': snippet_tag.get_text(strip=True)[:300] if snippet_tag else ''
                 })
         results = _dedupe_by_domain(results, max_results)
@@ -101,56 +98,11 @@ def search_web(query, max_results=6):
 
     return None
 
-# --- КАРТИНКИ (временно отключено — см. handlers.py) ---
-def generate_image(prompt, retries=2):
-    return None
-# --- TTS ---
-def text_to_speech(text):
-    try:
-        clean = re.sub(r'[*_#\[\]()]', '', text)[:800]
-        tts = gTTS(text=clean, lang='ru')
-        audio = io.BytesIO()
-        tts.write_to_fp(audio)
-        audio.seek(0)
-        audio.name = "voice.mp3"
-        return audio
-    except Exception as e:
-        logging.error(f"TTS ошибка: {e}")
-        return None
-
-# --- ТРАНСКРИБАЦИЯ ГОЛОСА ---
-def transcribe_voice(file_bytes, filename="voice.ogg"):
-    try:
-        response = requests.post(
-            "https://api.groq.com/openai/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {config.GROQ_KEY}"},
-            files={'file': (filename, file_bytes)},
-            data={'model': config.WHISPER_MODEL, "language": "ru"},
-            timeout=60
-        )
-        if response.status_code == 200:
-            return response.json().get("text", "").strip()
-        logging.error(f"Groq transcription ошибка {response.status_code}: {response.text[:200]}")
-    except Exception as e:
-        logging.error(f"Ошибка транскрибации: {e}")
-    return None
-
-# --- OCR ---
-def extract_text_from_image(image_bytes):
-    try:
-        image = Image.open(io.BytesIO(image_bytes))
-        text = pytesseract.image_to_string(image, lang='rus+eng')
-        return text.strip() if text.strip() else "Текст не найден"
-    except Exception as e:
-        logging.error(f"OCR ошибка: {e}")
-        return "Ошибка распознавания"
-        # --- ПОТОКОВАЯ ГЕНЕРАЦИЯ ОТВЕТА (Groq) ---
+# ---------- ПОТОКОВАЯ ГЕНЕРАЦИЯ ОТВЕТА (Groq) ----------
 def stream_groq_completion(messages, on_delta, max_tokens=2000, temperature=0.5):
-    """Стримит ответ от Groq, вызывая on_delta(full_text_so_far) на каждый новый кусок.
-    Возвращает полный текст либо None при ошибке."""
     full_text = ""
     try:
-        response = requests.post(
+        with requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": f"Bearer {config.GROQ_KEY}"},
             json={
@@ -160,43 +112,44 @@ def stream_groq_completion(messages, on_delta, max_tokens=2000, temperature=0.5)
                 "max_tokens": max_tokens,
                 "stream": True
             },
-            timeout=60,
-            stream=True
-        )
-        if response.status_code != 200:
-            logging.error(f"Groq stream ошибка {response.status_code}")
-            return None
+            stream=True,
+            timeout=60
+        ) as response:
+            if response.status_code != 200:
+                logging.error(f"Groq stream ошибка {response.status_code}: {response.text[:200]}")
+                return None
 
-        for raw_line in response.iter_lines():
-            if not raw_line:
-                continue
-            line = raw_line.decode('utf-8', errors='ignore')
-            if not line.startswith('data: '):
-                continue
-            data_str = line[6:].strip()
-            if data_str == '[DONE]':
-                break
-            try:
-                chunk = json.loads(data_str)
-                delta = chunk['choices'][0]['delta'].get('content', '')
-            except Exception:
-                continue
-            if not delta:
-                continue
-            full_text += delta
-            if len(full_text) >= config.STREAM_MAX_CHARS:
-                full_text = full_text[:config.STREAM_MAX_CHARS] + "..."
+            for raw_line in response.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode('utf-8', errors='ignore')
+                if not line.startswith('data: '):
+                    continue
+                data_str = line[6:].strip()
+                if data_str == '[DONE]':
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                    delta = chunk['choices'][0]['delta'].get('content', '')
+                except Exception:
+                    continue
+                if not delta:
+                    continue
+                full_text += delta
+                if len(full_text) >= config.STREAM_MAX_CHARS:
+                    full_text = full_text[:config.STREAM_MAX_CHARS] + "..."
+                    on_delta(full_text)
+                    break
                 on_delta(full_text)
-                break
-            on_delta(full_text)
     except Exception as e:
         logging.error(f"Ошибка стриминга Groq: {e}")
         db.track_error("stream_groq_completion", e)
         return None
+
     return full_text if full_text.strip() else None
 
+# ---------- ОБЫЧНЫЙ ЗАПРОС (без стриминга) ----------
 def groq_completion_simple(messages, max_tokens=1500, timeout=30):
-    """Обычный (не потоковый) запрос – используется для короткого fallback-ответа поиска."""
     try:
         response = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
