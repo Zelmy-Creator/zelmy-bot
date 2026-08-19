@@ -10,8 +10,6 @@ from bot_instance import bot, get_bot_username
 from cache import flood_limiter
 
 start_time = time.time()
-tts_cache = {}
-_sub_cache = {}
 
 # ГЛОБАЛЬНЫЙ ОБРАБОТЧИК ОШИБОК
 def safe_handler(func):
@@ -36,7 +34,9 @@ def safe_handler(func):
 def is_admin(user_id):
     return user_id == config.OWNER_ID
 
-# ------------------------------------------------------------ ПОДПИСКА НА КАНАЛ (обязательная, не путать с платной подпиской - её больше нет)
+# ---------- ПОДПИСКА НА КАНАЛ ----------
+_sub_cache = {}
+
 def is_subscribed_to_channel(user_id):
     if is_admin(user_id):
         return True
@@ -55,15 +55,14 @@ def is_subscribed_to_channel(user_id):
 
 def subscribe_prompt_markup():
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("📢 ПОДПИСАТЬСЯ", url=f"https://t.me/{config.CHANNEL_USERNAME.lstrip('@')}"))
+    markup.add(types.InlineKeyboardButton("📌 ПОДПИСАТЬСЯ", url=f"https://t.me/{config.CHANNEL_USERNAME.lstrip('@')}"))
     markup.add(types.InlineKeyboardButton("✅ Проверить", callback_data="check_sub"))
     return markup
 
 def require_subscription(message):
     if is_subscribed_to_channel(message.from_user.id):
         return True
-    bot.send_message(message.chat.id, f"📢 Чтобы пользоваться ботом, подпишись на канал {config.CHANNEL_USERNAME}",
-                     reply_markup=subscribe_prompt_markup())
+    bot.send_message(message.chat.id, f"Чтобы пользоваться ботом, подпишись на канал {config.CHANNEL_USERNAME}", reply_markup=subscribe_prompt_markup())
     return False
 
 def subscription_required(handler_func):
@@ -74,7 +73,7 @@ def subscription_required(handler_func):
         return handler_func(message, *args, **kwargs)
     return wrapper
 
-# --- АНТИФЛУД
+# ---------- АНТИФЛУД ----------
 def flood_check(message):
     if is_admin(message.from_user.id):
         return True
@@ -82,7 +81,8 @@ def flood_check(message):
         bot.reply_to(message, config.FLOOD_COOLDOWN_MESSAGE)
         return False
     return True
-# --- РЕФЕРАЛЫ (теперь просто счётчик для /mystats, без наград – наградой была подписка)
+
+# ---------- РЕФЕРАЛЫ ----------
 def handle_referral(new_user_id, referrer_id):
     if new_user_id == referrer_id:
         return
@@ -93,51 +93,28 @@ def handle_referral(new_user_id, referrer_id):
         return
     db.set_referred_by(new_user_id, referrer_id)
     db.increment_referral_count(referrer_id)
-
-# КЛАВИАТУРА
+    # ---------- КЛАВИАТУРА ----------
 def get_main_keyboard():
     keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     keyboard.add(
-        types.KeyboardButton("❓ Помощь"),
+        types.KeyboardButton("📖 Помощь"),
         types.KeyboardButton("🔍 Поиск"),
-        types.KeyboardButton("🖼 Фото"),
-        types.KeyboardButton("🗑 Очистить")
+        types.KeyboardButton("🧹 Очистить"),
+        types.KeyboardButton("ℹ️ Статус")
     )
     return keyboard
 
-# ОЗВУЧКА ПО КНОПКЕ
-@bot.callback_query_handler(func=lambda call: call.data == "tts_read")
-@safe_handler
-def tts_callback(call):
-    key = f"{call.message.chat.id}:{call.message.message_id}"
-    text = tts_cache.get(key)
-    if not text:
-        bot.answer_callback_query(call.id, "Текст недоступен (бот перезапускался).", show_alert=True)
-        return
-    bot.answer_callback_query(call.id, "🎤 Озвучиваю...")
-    bot.send_chat_action(call.message.chat.id, 'record_voice')
-    audio = ai.text_to_speech(text)
-    if audio:
-        bot.send_audio(call.message.chat.id, audio, title="Zelmy AI")
-    else:
-        bot.send_message(call.message.chat.id, "❌ Не получилось озвучить.")
-
-def _cache_tts(chat_id, message_id, text):
-    tts_cache[f"{chat_id}:{message_id}"] = text
-    if len(tts_cache) > 500:
-        tts_cache.pop(next(iter(tts_cache)), None)
-
-# ПОТОКОВЫЙ ОТВЕТ
+# ---------- ПОТОКОВЫЙ ОТВЕТ ----------
 def stream_reply(chat_id, messages, original_message=None, existing_message_id=None, max_tokens=2000):
     if existing_message_id:
         placeholder_id = existing_message_id
         try:
-            bot.edit_message_text("✏️ Печатаю ещё раз...", chat_id, placeholder_id)
+            bot.edit_message_text("⏳ Печатаю ещё раз...", chat_id, placeholder_id)
         except Exception:
             pass
     else:
         try:
-            placeholder = bot.reply_to(original_message, "✏️ Печатаю...") if original_message else bot.send_message(chat_id, "✏️ Печатаю...")
+            placeholder = bot.reply_to(original_message, "⏳ Печатаю...") if original_message else bot.send_message(chat_id, "⏳ Печатаю...")
             placeholder_id = placeholder.message_id
         except Exception as e:
             logging.error(f"Не удалось отправить плейсхолдер: {e}")
@@ -150,7 +127,7 @@ def stream_reply(chat_id, messages, original_message=None, existing_message_id=N
         now = time.time()
         if now - last_edit_time[0] >= config.STREAM_EDIT_INTERVAL and full_text != last_shown[0]:
             try:
-                bot.edit_message_text(full_text + " ✍️", chat_id, placeholder_id)
+                bot.edit_message_text(full_text + "▌", chat_id, placeholder_id)
                 last_edit_time[0] = now
                 last_shown[0] = full_text
             except Exception:
@@ -158,7 +135,8 @@ def stream_reply(chat_id, messages, original_message=None, existing_message_id=N
 
     out = ai.stream_groq_completion(messages, on_delta, max_tokens=max_tokens)
     return out, placeholder_id
-# --- ОСНОВНАЯ ЛОГИКА (без лимитов - всё бесплатно)
+
+# ---------- ОСНОВНАЯ ЛОГИКА ----------
 def process_llm_request(chat_id, user_id, text, original_message=None):
     if db.is_banned(user_id):
         bot.send_message(chat_id, "🚫 Вы забанены.")
@@ -183,13 +161,11 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
     if any(p in lowered for p in ['кто я', 'кто я?', 'я кто', 'кто твой создатель', 'чей ты бот']):
         plain_reply("Ты – Zelmy Create, мой создатель." if user_id == config.OWNER_ID else "Мой создатель – Zelmy Create.")
         return
-
     if "президент россии" in lowered and "2026" in lowered:
-        plain_reply("🇷🇺 Президент России в 2026 году – Владимир Путин.")
+        plain_reply("Президент России в 2026 году – Владимир Путин.")
         return
-
     if "президент сша" in lowered and "2026" in lowered:
-        plain_reply("🇺🇸 Президент США в 2026 году – Дональд Трамп.")
+        plain_reply("Президент США в 2026 году – Дональд Трамп.")
         return
 
     if any(w in lowered for w in ['найди', 'поищи', 'найти', 'поиск', '/search']):
@@ -206,9 +182,9 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
             {"role": "user", "content": text}
         ])
         if fallback:
-            send_ai_reply(chat_id, f"ℹ️ {fallback}", original_message)
+            plain_reply(f"🔍 {fallback}")
         else:
-            plain_reply("❌ Ничего не нашёл. Попробуй переформулировать запрос.")
+            plain_reply("Ничего не нашёл. Попробуй переформулировать запрос.")
         return
 
     db.add_history_message(chat_id, "user", text)
@@ -217,25 +193,23 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
     persona_prompt = config.PERSONAS.get(db.get_persona(user_id), config.PERSONAS["default"])
     sys_prompt = {
         "role": "system",
-        "content": (f"{persona_prompt}\n"
-                    "Если не знаешь – скажи честно.\n"
-                    f"{config.FORMATTING_INSTRUCTION}\n"
-                    f"{config.EXTREMISM_SYSTEM_RULE}")
+        "content": (
+            f"{persona_prompt}\n"
+            "Если не знаешь – скажи честно.\n"
+            f"{config.FORMATTING_INSTRUCTION}\n"
+            f"{config.EXTREMISM_SYSTEM_RULE}"
+        )
     }
     messages = [sys_prompt] + history
 
     out, placeholder_id = stream_reply(chat_id, messages, original_message)
-
     if not out:
         out, placeholder_id = stream_reply(chat_id, messages, original_message, existing_message_id=placeholder_id)
 
     if out:
         db.add_history_message(chat_id, "assistant", out)
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("🔊 Озвучить", callback_data="tts_read"))
         try:
-            bot.edit_message_text(out, chat_id, placeholder_id, reply_markup=markup)
-            _cache_tts(chat_id, placeholder_id, out)
+            bot.edit_message_text(out, chat_id, placeholder_id)
         except Exception as e:
             logging.error(f"Не удалось финализировать потоковое сообщение: {e}")
     else:
@@ -248,27 +222,18 @@ def process_llm_request(chat_id, user_id, text, original_message=None):
                 plain_reply(error_msg)
         else:
             plain_reply(error_msg)
-
-def send_ai_reply(chat_id, text, original_message=None):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🔊 Озвучить", callback_data="tts_read"))
-    try:
-        sent = bot.reply_to(original_message, text, reply_markup=markup) if original_message else bot.send_message(chat_id, text, reply_markup=markup)
-    except Exception as e:
-        logging.error(f"Ошибка отправки: {e}")
-        return None
-    _cache_tts(chat_id, sent.message_id, text)
-    return sent
 # ============================================================
+# ОБРАБОТЧИКИ КОМАНД
+# ============================================================
+
 @bot.message_handler(commands=['start'])
 @safe_handler
 def start_cmd(message):
     is_new = db.track_user(
         message.from_user.id,
-        message.from_user.username or "нет_username",
+        message.from_user.username or "нет_юзернейма",
         message.from_user.first_name or "Без имени"
     )
-
     parts = message.text.split(maxsplit=1)
     if is_new and len(parts) > 1 and parts[1].startswith("ref_"):
         ref_id = parts[1][4:]
@@ -276,23 +241,30 @@ def start_cmd(message):
             handle_referral(message.from_user.id, int(ref_id))
 
     if not is_subscribed_to_channel(message.from_user.id):
-        bot.send_message(message.chat.id,
-                         "👋 <b>Привет, я Zelmy AI!</b>\n\nПодпишись на канал, чтобы пользоваться ботом: @ZelmyAI",
-                         parse_mode="HTML", reply_markup=subscribe_prompt_markup())
+        bot.send_message(
+            message.chat.id,
+            "👋 <b>Привет, я Zelmy AI!</b>\n\nПодпишись на канал, чтобы пользоваться ботом: @ZelmyAI",
+            parse_mode="HTML",
+            reply_markup=subscribe_prompt_markup()
+        )
         return
 
-    bot.send_message(message.chat.id,
-                     "<b>🤖 Zelmy AI</b> – теперь полностью бесплатно, без ограничений и тарифов\n\n"
-                     "<b>Что я умею:</b>\n"
-                     "• Отвечать на любые вопросы (+ озвучка ответа)\n"
-                     "• Искать в интернете: <code>/search ...</code>\n"
-                     "• Озвучивать текст: <code>/voice ...</code>\n"
-                     "• Распознавать текст с фото и картинок-файлов\n"
-                     "• Понимать голосовые сообщения\n"
-                     "• Помнить историю диалога до 30 дней\n"
-                     "• Менять стиль общения: <code>/persona ...</code>\n\n"
-                     "<b>Команды:</b> /help – полный список",
-                     parse_mode="HTML", reply_markup=get_main_keyboard())
+    # ---------- ПРИВЕТСТВЕННОЕ СООБЩЕНИЕ ----------
+    welcome_text = (
+        "Привет! 👋 Я твой ИИ-помощник Zelmy. Рад познакомиться!\n\n"
+        "Я здесь, чтобы помогать тебе с идеями, отвечать на вопросы, "
+        "разбираться со сложными задачами и просто быть полезным, "
+        "когда тебе это нужно. Можешь общаться со мной как обычно — "
+        "без формальностей.\n\n"
+        "Ну что, с чего начнём? 🚀"
+    )
+
+    bot.send_message(
+        message.chat.id,
+        welcome_text,
+        parse_mode="HTML",
+        reply_markup=get_main_keyboard()
+    )
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
 @safe_handler
@@ -319,12 +291,8 @@ def help_cmd(message):
         "/mystats - моя статистика\n"
         "/status - статус бота\n"
         "/search [запрос] - поиск в интернете\n"
-        "/voice [текст] - озвучить текст\n"
         "/persona [стиль] - сменить стиль общения\n"
-        "/clear - очистить историю\n\n"
-        "📷 Отправь фото или картинку-файл - распознаю текст\n"
-        "🎤 Отправь голосовое - отвечу как на обычное сообщение\n"
-        "🔊 Под каждым моим ответом есть кнопка «Озвучить»"
+        "/clear - очистить историю"
     )
     bot.reply_to(message, text, parse_mode="HTML")
 
@@ -348,7 +316,7 @@ def invite_cmd(message):
     link = f"https://t.me/{get_bot_username()}?start=ref_{user_id}"
     user = db.get_user(user_id) or {}
     text = (
-        "<b>👥 Пригласи друзей</b>\n\n"
+        "<b>Пригласи друзей</b>\n\n"
         f"Твоя ссылка:\n<code>{link}</code>\n\n"
         f"Приглашено: {user.get('referral_count', 0)}"
     )
@@ -359,7 +327,7 @@ def invite_cmd(message):
 @safe_handler
 def profile_cmd(message):
     user_id = message.from_user.id
-    text = f"<b>👤 Твой профиль</b>\n\nID: {user_id}\nДоступ: все функции бесплатно"
+    text = f"<b>Твой профиль</b>\n\nID: {user_id}\nДоступ: все функции бесплатно"
     bot.reply_to(message, text, parse_mode="HTML")
 
 @bot.message_handler(commands=['mystats'])
@@ -369,7 +337,7 @@ def mystats_cmd(message):
     user_id = message.from_user.id
     user = db.get_user(user_id) or {}
     text = (
-        f"<b>📊 Твоя статистика</b>\n\n"
+        "<b>Твоя статистика</b>\n\n"
         f"С нами с: {user.get('first_seen', '-')}\n"
         f"Приглашено друзей: {user.get('referral_count', 0)}"
     )
@@ -382,7 +350,7 @@ def status_cmd(message):
     uptime = time.time() - start_time
     hours, minutes = int(uptime // 3600), int((uptime % 3600) // 60)
     text = (
-        f"<b>📡 Статус бота</b>\n\n"
+        "<b>Статус бота</b>\n\n"
         f"Время работы: {hours}ч {minutes}м\n"
         f"Пользователей: {len(db.get_all_users())}\n"
         f"Модель: {config.CURRENT_MODEL}"
@@ -394,7 +362,7 @@ def status_cmd(message):
 @safe_handler
 def clear_cmd(message):
     db.clear_history(message.chat.id)
-    bot.reply_to(message, "🗑 История очищена!")
+    bot.reply_to(message, "🧹 История очищена!")
 
 @bot.message_handler(commands=['search'])
 @subscription_required
@@ -408,35 +376,7 @@ def search_cmd(message):
         bot.reply_to(message, "Напиши запрос: <code>/search курс доллара</code>", parse_mode="HTML")
         return
     process_llm_request(message.chat.id, message.from_user.id, f"найди {query}", message)
-@bot.message_handler(commands=['image'])
-@subscription_required
-@safe_handler
-def image_cmd(message):
-    bot.reply_to(message, "🎨 Генерация картинок временно отключена на техническое обслуживание.")
-
-@bot.message_handler(commands=['voice'])
-@subscription_required
-@safe_handler
-def voice_cmd(message):
-    user_id = message.from_user.id
-    if db.is_banned(user_id):
-        bot.reply_to(message, "🚫 Вы забанены.")
-        return
-    if not flood_check(message):
-        return
-    parts = message.text.split(maxsplit=1)
-    text_to_read = parts[1].strip() if len(parts) > 1 else ""
-    if not text_to_read:
-        bot.reply_to(message, "Напиши текст: <code>/voice привет, как дела</code>", parse_mode="HTML")
-        return
-    bot.send_chat_action(message.chat.id, 'record_voice')
-    audio = ai.text_to_speech(text_to_read)
-    if audio:
-        bot.send_audio(message.chat.id, audio, title="Zelmy AI", reply_to_message_id=message.message_id)
-    else:
-        bot.reply_to(message, "❌ Не получилось озвучить текст.")
-
-# АДМИНКА
+# ---------- АДМИНКА ----------
 @bot.message_handler(commands=['admin', 'users'])
 @safe_handler
 def admin_users_cmd(message):
@@ -446,12 +386,10 @@ def admin_users_cmd(message):
     if not users:
         bot.reply_to(message, "Пользователей пока нет.")
         return
-
     lines = []
     for u in users:
-        ban_mark = " 🚫" if u.get('banned') else ""
-        lines.append(f"<code>{u['id']}</code> - @{u.get('username', '-')} - {u.get('first_name', '')}{ban_mark}")
-
+        ban_mark = "🚫" if u.get('banned') else ""
+        lines.append(f"<code>{u['id']}</code> - @{u.get('username','-')} - {u.get('first_name','')} {ban_mark}")
     chunk = f"<b>Пользователи ({len(users)}):</b>\n\n"
     for line in lines:
         if len(chunk) + len(line) > 3500:
@@ -467,9 +405,9 @@ def stats_cmd(message):
     if not is_admin(message.from_user.id):
         return
     events = db.get_all_events()
-    events_lines = "\n".join(f"  {name}: {count}" for name, count in events) or " (пока пусто)"
+    events_lines = "\n".join(f"• {name}: {count}" for name, count in events) or "(пока пусто)"
     text = (
-        f"📊 <b>Статистика бота</b>\n\n"
+        "📊 <b>Статистика бота</b>\n\n"
         f"Всего пользователей: {len(db.get_all_users())}\n"
         f"Активных сегодня: {db.get_active_today_count()}\n\n"
         f"<b>События (за всё время):</b>\n{events_lines}\n\n"
@@ -487,7 +425,7 @@ def lasterror_cmd(message):
     if not errors:
         bot.reply_to(message, "Ошибок пока не зафиксировано.")
         return
-    text = "<b>🔴 Последние ошибки:</b>\n\n" + "\n\n".join(
+    text = "<b>Последние ошибки:</b>\n\n" + "\n\n".join(
         f"<code>{e['time']}</code> [{e['context']}]\n{e['error']}" for e in errors
     )
     bot.reply_to(message, text[:4000], parse_mode="HTML")
@@ -523,81 +461,36 @@ def unban_cmd(message):
         return
     db.set_banned(uid, False)
     bot.reply_to(message, f"✅ Пользователь {uid} разбанен.")
-
-# --- ФОТО / ДОКУМЕНТЫ / ГОЛОС (теперь без ограничений по тарифу) ---
-@bot.message_handler(content_types=['photo'])
+    # ---------- КНОПКИ КЛАВИАТУРЫ ----------
+@bot.message_handler(func=lambda message: message.text == "📖 Помощь")
 @subscription_required
 @safe_handler
-def photo_handler(message):
-    user_id = message.from_user.id
-    if db.is_banned(user_id):
-        bot.reply_to(message, "🚫 Вы забанены.")
-        return
-    if not flood_check(message):
-        return
-    bot.send_chat_action(message.chat.id, 'typing')
-    file_info = bot.get_file(message.photo[-1].file_id)
-    downloaded = bot.download_file(file_info.file_path)
-    text = ai.extract_text_from_image(downloaded)
-    bot.reply_to(message, f"<b>📷 Текст с фото:</b>\n\n{text}", parse_mode="HTML")
+def help_button_handler(message):
+    help_cmd(message)
 
-@bot.message_handler(content_types=['document'])
+@bot.message_handler(func=lambda message: message.text == "🔍 Поиск")
 @subscription_required
 @safe_handler
-def document_handler(message):
-    user_id = message.from_user.id
-    if db.is_banned(user_id):
-        bot.reply_to(message, "🚫 Вы забанены.")
-        return
-    mime = message.document.mime_type or ""
-    if not mime.startswith("image/"):
-        bot.reply_to(message, "📄 Я умею распознавать текст только с изображений.")
-        return
-    if not flood_check(message):
-        return
-    bot.send_chat_action(message.chat.id, 'typing')
-    file_info = bot.get_file(message.document.file_id)
-    downloaded = bot.download_file(file_info.file_path)
-    text = ai.extract_text_from_image(downloaded)
-    bot.reply_to(message, f"<b>📄 Текст с изображения:</b>\n\n{text}", parse_mode="HTML")
+def search_button_handler(message):
+    bot.reply_to(message, "Напиши запрос после команды:\n<code>/search что ищешь</code>", parse_mode="HTML")
 
-@bot.message_handler(content_types=['voice'])
+@bot.message_handler(func=lambda message: message.text == "🧹 Очистить")
 @subscription_required
 @safe_handler
-def voice_message_handler(message):
-    user_id = message.from_user.id
-    if db.is_banned(user_id):
-        bot.reply_to(message, "🚫 Вы забанены.")
-        return
-    if not flood_check(message):
-        return
-    bot.send_chat_action(message.chat.id, 'typing')
-    file_info = bot.get_file(message.voice.file_id)
-    downloaded = bot.download_file(file_info.file_path)
-    text = ai.transcribe_voice(downloaded)
-    if not text:
-        bot.reply_to(message, "❌ Не удалось распознать голосовое сообщение.")
-        return
-    process_llm_request(message.chat.id, user_id, text, message)
-   # ТЕКСТ И КНОПКИ КЛАВИАТУРЫ
-BUTTON_ACTIONS = {
-    "❓ Помощь": lambda m: help_cmd(m),
-    "🔍 Поиск": lambda m: bot.reply_to(m, "Напиши /search [запрос]"),
-    "🖼 Фото": lambda m: bot.reply_to(m, "Отправь мне фото или картинку-файл, и я распознаю текст на ней."),
-    "🗑 Очистить": lambda m: clear_cmd(m),
-}
+def clear_button_handler(message):
+    clear_cmd(message)
 
-@bot.message_handler(func=lambda m: m.text in BUTTON_ACTIONS)
+@bot.message_handler(func=lambda message: message.text == "ℹ️ Статус")
 @subscription_required
 @safe_handler
-def button_handler(message):
-    BUTTON_ACTIONS[message.text](message)
+def status_button_handler(message):
+    status_cmd(message)
 
-# ОБРАБОТЧИК ТЕКСТА (всё остальное)
-@bot.message_handler(func=lambda m: True, content_types=['text'])
+# ---------- ТЕКСТОВЫЕ СООБЩЕНИЯ ----------
+@bot.message_handler(func=lambda message: True)
 @subscription_required
 @safe_handler
 def text_handler(message):
     if not flood_check(message):
         return
-    process_llm_request(message.chat.id, message.from_user.id, message.text, message) 
+    process_llm_request(message.chat.id, message.from_user.id, message.text, message)
