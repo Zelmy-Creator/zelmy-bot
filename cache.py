@@ -2,7 +2,9 @@ import time
 import threading
 import hashlib
 from collections import defaultdict, deque
+
 import config
+
 
 class TTLCache:
     def __init__(self):
@@ -35,10 +37,13 @@ class TTLCache:
                 for k in expired:
                     del self._data[k]
 
+
 search_cache = TTLCache()  # кэш результатов поиска по тексту запроса
+
 
 class RateLimiter:
     """Скользящее окно: не больше N запросов за Т секунд на пользователя."""
+
     def __init__(self, max_requests, window_seconds):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
@@ -56,7 +61,5 @@ class RateLimiter:
             hits.append(now)
             return True
 
-flood_limiter = RateLimiter(config.FLOOD_MAX_REQUESTS, config.FLOOD_WINDOW_SECONDS)
-            return True
 
 flood_limiter = RateLimiter(config.FLOOD_MAX_REQUESTS, config.FLOOD_WINDOW_SECONDS)
