@@ -1,20 +1,8 @@
-"""
-Кэширование и антифлуд.
-
-Про Redis: сознательно НЕ подключаю его сейчас. Redis — это отдельный сервис, 
-который на Railway нужно поднимать и оплачивать отдельно, плюс это лишняя точка 
-отказа (если Redis недоступен — что тогда с ботом?). Для одного процесса бота 
-in-memory словарь с TTL даёт тот же эффект (не дёргать API повторно на одинаковый 
-запрос) без дополнительной инфраструктуры. Если бот когда-нибудь будет запущен 
-в нескольких инстансах одновременно — тогда Redis станет оправдан, и этот модуль 
-легко заменить, не трогая остальной код (интерфейс тот же: get/set).
-"""
 import time
 import threading
 import hashlib
 from collections import defaultdict, deque
 import config
-
 
 class TTLCache:
     def __init__(self):
@@ -47,9 +35,7 @@ class TTLCache:
                 for k in expired:
                     del self._data[k]
 
-
 search_cache = TTLCache()  # кэш результатов поиска по тексту запроса
-
 
 class RateLimiter:
     """Скользящее окно: не больше N запросов за Т секунд на пользователя."""
@@ -70,5 +56,7 @@ class RateLimiter:
             hits.append(now)
             return True
 
+flood_limiter = RateLimiter(config.FLOOD_MAX_REQUESTS, config.FLOOD_WINDOW_SECONDS)
+            return True
 
 flood_limiter = RateLimiter(config.FLOOD_MAX_REQUESTS, config.FLOOD_WINDOW_SECONDS)
