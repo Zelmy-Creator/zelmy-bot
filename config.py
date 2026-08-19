@@ -8,7 +8,7 @@ CHANNEL_USERNAME = "@ZelmyAI"
 
 DB_PATH = os.environ.get("DB_PATH", "zelmy.db")
 
-CURRENT_MODEL = "mixtral-8x7b-32768"
+CURRENT_MODEL = "openai/gpt-oss-20b"
 
 HISTORY_RETENTION_DAYS = 30
 HISTORY_LIMIT = 300
